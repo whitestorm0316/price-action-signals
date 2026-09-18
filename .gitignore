@@ -1,0 +1,7 @@
+# 敏感配置（模拟盘 API 凭证），禁止提交
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/

@@ -1,0 +1,929 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="Y8Rg9NxyLhPzI4sbCb8lIx">
+<head data-page-node-id="IB1Ft9URMT90BQAHDcTxm9">
+<meta charset="UTF-8" data-page-node-id="2gXTXuNVWrafbI2xFtT3az">
+<meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="hGvAQWzrWW7RDP8BZfUuwi">
+<title>价格行为信号仪表盘</title>
+<!-- lightweight-charts via CDN (不用 npm 构建) -->
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px; font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: #131722; color: #d1d4dc;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #787b86; font-size: 13px; margin-bottom: 16px; }
+  .toolbar {
+    display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+    margin-bottom: 16px; padding: 12px; background: #1e222d; border-radius: 8px;
+  }
+  .toolbar label { font-size: 13px; color: #b2b5be; }
+  .toolbar input, .toolbar select {
+    background: #131722; color: #d1d4dc; border: 1px solid #363a45;
+    border-radius: 4px; padding: 6px 8px; font-size: 13px;
+  }
+  button {
+    background: #2962ff; color: #fff; border: none; border-radius: 4px;
+    padding: 7px 14px; font-size: 13px; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.1); }
+  button.secondary { background: #363a45; }
+  .chart-wrap {
+    background: #1e222d; border-radius: 8px; padding: 10px; margin-bottom: 16px;
+  }
+  #chart { width: 100%; height: 560px; }
+  .summary { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin:12px 0; }
+  .metric { border:1px solid #363a45; border-radius:8px; padding:14px; background:#191e2a; }
+  .metric small, .note { color:#b2b5be; font-size:12px; }
+  .metric strong { display:block; font-size:24px; margin:8px 0; font-variant-numeric:tabular-nums; }
+  .note { line-height:1.8; margin-bottom:10px; }
+  #signals-table { overflow-x:auto; }
+  #volume-legend { font-size:12px; color:#b2b5be; padding:4px 6px 10px; }
+  :focus-visible { outline:2px solid #82aaff; outline-offset:3px; }
+  @media(max-width:700px) { body { padding:10px; } .summary { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+  .table-wrap { background: #1e222d; border-radius: 8px; padding: 12px; }
+  .table-wrap h2 { font-size: 15px; margin: 0 0 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #2a2e39; }
+  th { color: #787b86; font-weight: 500; }
+  tr:hover td { background: #262b3a; }
+  .badge { padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+  .badge.buy { background: rgba(38,166,154,.18); color: #26a69a; }
+  .badge.sell { background: rgba(239,83,80,.18); color: #ef5350; }
+  .mono { font-variant-numeric: tabular-nums; }
+  .empty { color: #787b86; text-align: center; padding: 20px; }
+  .err { color: #ef5350; font-size: 13px; padding: 8px 0; }
+  .ok { color: #26a69a; font-size: 13px; }
+  /* 结果徽章 */
+  .badge.win  { background: rgba(38,166,154,.18); color: #26a69a; }
+  .badge.loss { background: rgba(239,83,80,.18); color: #ef5350; }
+  .badge.open { background: rgba(120,123,134,.18); color: #b2b5be; }
+  .green { color: #26a69a; font-weight: 600; }
+  .red { color: #ef5350; font-weight: 600; }
+  /* 下单按钮样式 */
+  .order-btn { background:#2962ff; color:#fff; border:none; border-radius:5px; padding:5px 12px; cursor:pointer; font-size:12px; font-weight:600; white-space:nowrap; transition:all .15s; }
+  .order-btn:hover { background:#1e4bd8; transform:scale(1.03); }
+  .order-btn:active { transform:scale(0.97); }
+  /* 表格选中行高亮 + 可点击提示 */
+  tr[data-idx] { cursor: pointer; }
+  tr.sel td { background: #2a3550; }
+  tr.sel td:first-child { border-left: 3px solid #2962ff; }
+  /* 设置弹窗：必须用 :not([hidden]) 控制显示，避免 display:flex 覆盖 hidden 属性 */
+  .modal-overlay { position:fixed; inset:0; background:rgba(2,6,23,.6); align-items:center; justify-content:center; z-index:50; display:none; }
+  .modal-overlay:not([hidden]) { display:flex; }
+  .modal { background:#1e222d; border:1px solid #363a45; border-radius:10px; padding:22px; width:min(440px,92vw); }
+  .modal h2 { margin:0 0 8px; font-size:16px; }
+  .modal label { display:block; margin:10px 0; font-size:13px; color:#b2b5be; }
+  .modal input { width:100%; background:#131722; color:#d1d4dc; border:1px solid #363a45; border-radius:4px; padding:8px; margin-top:4px; font-size:13px; }
+  .modal .order-size-input { width:80px; text-align:center; font-size:16px; font-weight:700; background:#1e222d; }
+  .modal .modal-actions { display:flex; justify-content:flex-end; gap:10px; margin-top:16px; }
+  .modal code { background:#131722; padding:1px 4px; border-radius:3px; }
+  /* 全局醒目通知(Toast)：成功/失败/警告 强反馈 */
+  #toast-container { position:fixed; top:16px; right:16px; z-index:100; display:flex; flex-direction:column; gap:10px; max-width:min(420px,92vw); }
+  .toast {
+    display:flex; align-items:flex-start; gap:10px; padding:14px 16px; border-radius:8px;
+    background:#1e222d; border:1px solid #363a45; border-left-width:4px; box-shadow:0 6px 24px rgba(0,0,0,.45);
+    animation: toastIn .25s ease; cursor:pointer;
+  }
+  .toast.success { border-left-color:#26a69a; }
+  .toast.error { border-left-color:#ef5350; }
+  .toast.warning { border-left-color:#e6b85c; }
+  .toast.info { border-left-color:#2962ff; }
+  .toast .toast-icon { font-size:18px; line-height:1.3; }
+  .toast .toast-body { flex:1; min-width:0; }
+  .toast .toast-title { font-weight:600; font-size:14px; margin-bottom:2px; }
+  .toast .toast-msg { font-size:13px; color:#b2b5be; word-break:break-word; }
+  .toast.success .toast-title { color:#26a69a; }
+  .toast.error .toast-title { color:#ef5350; }
+  .toast.warning .toast-title { color:#e6b85c; }
+  .toast.info .toast-title { color:#82aaff; }
+  @keyframes toastIn { from { opacity:0; transform:translateX(20px); } to { opacity:1; transform:none; } }
+</style>
+</head>
+<body data-page-node-id="hHDcZ98acbJLkcKfcDcVne">
+  <h1 data-page-node-id="TEMRiEAgZBRStsPbbKuIm2">价格行为信号仪表盘</h1>
+  <div class="sub" data-page-node-id="paWBnnuHgRpTTSQcpaXzm1">OKX 模拟盘 · 只读展示 + 手动下单（当前下单为 mock）</div>
+
+  <div class="toolbar" data-page-node-id="cJNHH8pjJQECnWrhz9Y1HL">
+    <label data-page-node-id="ep2X191Evxw964PNxV72W5">交易对 <select id="ticker" data-page-node-id="pIsq5KzhBTW24LnzrDeS4X"></select></label>
+    <label data-page-node-id="4XFUJrtAcHp7xtfDjf5J0f">周期
+      <select id="interval" data-page-node-id="Y1AuWclGxodPxDkWas41N4">
+        <option value="1m" data-page-node-id="h3f9rBpOkgU0vUI4EdOhSF">1m</option>
+        <option value="5m" selected data-page-node-id="1gIQ85upi5ZXAXjdkmKtqp">5m</option>
+        <option value="15m" data-page-node-id="lqOdA0A99KHhOB5LlFcsU1">15m</option>
+        <option value="30m" data-page-node-id="umBlFRF9VUGDp9idIyd5Ie">30m</option>
+        <option value="1H" data-page-node-id="FtObSUcRQQFXB5yqZipp4m">1H</option>
+        <option value="4H" data-page-node-id="JHGoJlTIbLvXsHAdAjwNaS">4H</option>
+      </select>
+    </label>
+    <label>K线数量 <input id="limit" type="number" value="100" min="30" max="3000" style="width:70px" title="最多3000；OKX最近行情端点约保留1440根(5m/1H)，超出部分拉不到"></label>
+    <label>扫描窗口 <input id="scan" type="number" value="100" min="10" max="3000" style="width:70px" title="检查最近多少根K线里的信号"></label>
+    <label>单笔风险 <input id="risk-pct" type="number" value="5" min="1" max="15" step="0.5" style="width:60px" onchange="refreshAll()" title="每次下单风险占总权益的比例(%)
+10-20笔可并行 = 风险5%
+5-10笔可并行 = 风险10%">%</label>
+    <label style="display:flex;align-items:center;gap:4px;">
+      <input id="trend-on" type="checkbox"> 趋势交易
+    </label>
+    <label>均线 <input id="trend-period" type="number" value="50" min="5" max="200" style="width:60px"></label>
+    <label>类型
+      <select id="ma-type">
+        <option value="sma" selected>SMA</option>
+        <option value="ema">EMA</option>
+      </select>
+    </label>
+    <label title="仅确认或降级价格行为信号；缩量且盈亏比小于2时过滤">
+      <input id="volume-on" type="checkbox"> 量能确认
+    </label>
+    <label><input id="volume-visible" type="checkbox" checked> 显示成交量</label>
+    <button onclick="refreshAll()">刷新</button>
+    <button class="secondary" onclick="openConfig()">设置</button>
+    <button class="secondary" onclick="toggleAccount()" title="查看余额 / 当前仓位 / 下单历史 / 挂单">账户</button>
+    <label style="display:flex;align-items:center;gap:4px;" data-page-node-id="6t4MDdmf52yDprbXyYw844">
+      <input id="poll" type="checkbox" data-page-node-id="6GnxhZrPuTd2WG0722pfEV"> 自动轮询(30s)
+    </label>
+    <span id="status" data-page-node-id="wkyN2LGbKfdy38lC1KaaZs"></span>
+  </div>
+
+  <div class="chart-wrap" data-page-node-id="IVgk0NRBeOJCWrJmfeLUiB">
+    <div id="volume-legend">成交量（张） · 绿柱：阳线 / 红柱：阴线 · 黄线：前20根均量（不含当前）</div>
+    <div id="chart" data-page-node-id="7FmJB5uKFQM6keWc2McE3T"></div>
+  </div>
+
+  <div class="table-wrap" data-page-node-id="l3ssCgcRwgw6EU1nFglaxv">
+    <h2 data-page-node-id="BLU0CoIjE4jGAEvurEvABq">最近信号</h2>
+    <div id="signal-summary" class="summary" aria-live="polite"></div>
+    <div id="summary-note" class="note">汇总当前扫描窗口内、过滤后保留的信号。胜率 = 成功 /（成功 + 失败），不含持仓中；未计手续费与滑点。</div>
+    <div id="signals-table" data-page-node-id="h45NpHLiFOSQ9YJyTCQoFJ">
+      <div class="empty" data-page-node-id="9siWn8EXWszqm8sDPNeIez">暂无信号，请点击「刷新」。</div>
+    </div>
+    <div id="order-status" data-page-node-id="Vzab4QmcCUM6MdlKgwgrAO"></div>
+  </div>
+
+  <!-- 设置弹窗：OKX 模拟盘凭证 + 代理，保存后自动写入 .env 并热更新 -->
+  <div id="config-modal" class="modal-overlay" hidden>
+    <div class="modal">
+      <h2>OKX 模拟盘设置</h2>
+      <p class="note">保存后自动写入本地 <code>.env</code> 文件并立即生效（无需重启）。
+        凭证仅保存在本机，不会上传。模拟盘交易始终带 <code>x-simulated-trading:1</code>，绝不碰实盘。</p>
+      <label>API Key<br><input id="cfg-key" type="text" autocomplete="off" placeholder="e864...4267"></label>
+      <label>API Secret<br><input id="cfg-secret" type="password" autocomplete="off" placeholder="B460...10FB"></label>
+      <label>Passphrase<br><input id="cfg-pass" type="password" autocomplete="off" placeholder="模拟盘 Passphrase"></label>
+      <label>代理 OKX_PROXY<br><input id="cfg-proxy" type="text" autocomplete="off" placeholder="http://127.0.0.1:1087"></label>
+      <div id="config-status"></div>
+      <div class="modal-actions">
+        <button class="secondary" onclick="closeConfig()">关闭</button>
+        <button onclick="saveConfig()">保存并生效</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 账户面板 -->
+  <div id="account-panel" class="table-wrap" hidden>
+    <h2>我的账户 <button class="secondary" onclick="loadAccount()" style="margin-left:8px;padding:3px 10px;font-size:12px;">刷新</button></h2>
+    <div id="account-err" class="err" hidden></div>
+    <div id="account-mock" class="note" hidden></div>
+
+    <h3 style="font-size:13px;color:#b2b5be;margin:12px 0 6px;">资产余额</h3>
+    <div id="account-balance" class="empty" style="padding:8px;">加载中...</div>
+
+    <h3 style="font-size:13px;color:#b2b5be;margin:12px 0 6px;">当前仓位</h3>
+    <div id="account-positions" class="empty" style="padding:8px;">加载中...</div>
+
+    <h3 style="font-size:13px;color:#b2b5be;margin:12px 0 6px;">当前挂单</h3>
+    <div id="account-pending" class="empty" style="padding:8px;">加载中...</div>
+
+    <h3 style="font-size:13px;color:#b2b5be;margin:12px 0 6px;">已成交下单历史</h3>
+    <div id="account-orders" class="empty" style="padding:8px;">加载中...</div>
+  </div>
+
+  <!-- 下单确认弹窗 -->
+  <div id="order-modal" class="modal-overlay" hidden>
+    <div class="modal" style="width:min(500px,95vw)">
+      <h2 id="order-modal-title">确认下单</h2>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;margin:12px 0;font-size:13px;">
+        <div><span style="color:#b2b5be">方向</span> <span id="om-side" class="badge buy" style="font-size:13px">BUY</span></div>
+        <div><span style="color:#b2b5be">策略</span> <span id="om-strategy" class="mono">-</span></div>
+        <div><span style="color:#b2b5be">入场价</span> <span id="om-price" class="mono">-</span></div>
+        <div><span style="color:#b2b5be">盈亏比</span> <span id="om-rr" class="mono">-</span></div>
+        <div><span style="color:#b2b5be">止损价</span> <span id="om-sl" class="mono red">-</span></div>
+        <div><span style="color:#b2b5be">止盈价</span> <span id="om-tp" class="mono green">-</span></div>
+      </div>
+
+      <div style="background:#131722;border-radius:6px;padding:12px;margin:10px 0;">
+        <label style="font-size:13px;color:#b2b5be;display:block;margin-bottom:6px;">合约张数（可调整）</label>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <button class="secondary" onclick="adjOrderSize(-1)" style="padding:4px 10px;font-size:16px">−</button>
+          <input id="om-size" type="number" min="1" value="1" style="width:80px;text-align:center;font-size:16px;font-weight:700;background:#1e222d;color:#d1d4dc;border:1px solid #363a45;border-radius:4px;padding:6px;">
+          <button class="secondary" onclick="adjOrderSize(1)" style="padding:4px 10px;font-size:16px">+</button>
+          <button class="secondary" onclick="setOrderSizeMax()" style="font-size:11px;padding:4px 8px">最大</button>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;margin:12px 0;font-size:13px;">
+        <div><span style="color:#b2b5be">仓位价值</span> <span id="om-notional" class="mono">-</span> USDT</div>
+        <div><span style="color:#b2b5be">占可用保证金</span> <span id="om-margin-pct" class="mono" style="font-weight:700">-</span></div>
+        <div><span style="color:#b2b5be">预计盈利</span> <span id="om-profit" class="mono green">-</span> USDT</div>
+        <div><span style="color:#b2b5be">预计亏损</span> <span id="om-loss" class="mono red">-</span> USDT</div>
+        <div><span style="color:#b2b5be">手续费</span> <span id="om-fee" class="mono" style="color:#b2b5be">-</span> USDT</div>
+        <div><span style="color:#b2b5be">净盈利</span> <span id="om-net-profit" class="mono green" style="font-weight:700">-</span> USDT</div>
+      </div>
+
+      <div class="modal-actions">
+        <button class="secondary" onclick="closeOrderModal()">取消</button>
+        <button id="om-confirm-btn" class="order-btn" onclick="confirmOrder()" style="font-size:14px;padding:8px 24px">确认下单</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 全局醒目通知容器 -->
+  <div id="toast-container" aria-live="polite"></div>
+
+<script>
+// ---- 配置 ----
+const TICKERS = ["BTC-USDT-SWAP"];          // 后端只允许这些
+const POLL_MS = 30000;
+// 买入=绿, 卖出=红
+const COLORS = { BUY: "#26a69a", SELL: "#ef5350" };
+const LINESTYLES = { entry: 0, sl: 2, tp: 1 }; // 实线/虚线/点线(近似)
+
+// ---- 初始化 ----
+const tickerEl = document.getElementById('ticker');
+TICKERS.forEach(t => {
+  const opt = document.createElement('option');
+  opt.value = t; opt.textContent = t;
+  if (t === '{{ default_ticker }}') opt.selected = true;
+  tickerEl.appendChild(opt);
+});
+
+const chartEl = document.getElementById('chart');
+const chart = LightweightCharts.createChart(chartEl, {
+  layout: { background: { color: '#1e222d' }, textColor: '#d1d4dc' },
+  grid: { vertLines: { color: '#2a2e39' }, horzLines: { color: '#2a2e39' } },
+  // timeVisible: true 让横轴显示到时分，不显示秒
+  timeScale: { borderColor: '#363a45', timeVisible: true, secondsVisible: false },
+  rightPriceScale: { borderColor: '#363a45' },
+  // 让横轴时间与表格一致：按浏览器本地时区显示（默认是 UTC，会差 8 小时）
+  localization: {
+    timeFormatter: (time) => {
+      if (typeof time === 'object' && time !== null) {
+        // 日级 BusinessDay: {year,month,day}，按本地日期显示
+        return new Date(Date.UTC(time.year, time.month - 1, time.day))
+          .toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' });
+      }
+      return new Date(time * 1000).toLocaleString('zh-CN', {
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hour12: false,
+      });
+    },
+  },
+  width: chartEl.clientWidth, height: 560,
+});
+const series = chart.addCandlestickSeries({
+  upColor: '#26a69a', downColor: '#ef5350',
+  borderUpColor: '#26a69a', borderDownColor: '#ef5350',
+  wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+});
+
+// 独立量轴占图底部22%，共用时间轴，缩放/拖动天然同步。
+const volumeSeries = chart.addHistogramSeries({
+  priceFormat: { type: 'volume' }, priceScaleId: 'volume',
+  lastValueVisible: false, priceLineVisible: false,
+});
+const volumeAverage = chart.addLineSeries({
+  priceScaleId: 'volume', color: '#e6b85c', lineWidth: 1,
+  priceFormat: { type: 'volume' }, lastValueVisible: false, priceLineVisible: false,
+});
+function toggleVolumeChart() {
+  const visible = document.getElementById('volume-visible').checked;
+  volumeSeries.applyOptions({ visible });
+  volumeAverage.applyOptions({ visible });
+  series.priceScale().applyOptions({ scaleMargins: { top: 0.08, bottom: visible ? 0.30 : 0.08 } });
+  volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.78, bottom: 0 } });
+  document.getElementById('volume-legend').hidden = !visible;
+}
+toggleVolumeChart();
+
+function setStatus(msg, cls) {
+  const el = document.getElementById('status');
+  el.className = cls || '';
+  el.textContent = msg;
+}
+
+// ---- 数据加载 ----
+async function loadKlines() {
+  const params = new URLSearchParams({
+    ticker: tickerEl.value,
+    interval: document.getElementById('interval').value,
+    limit: document.getElementById('limit').value || '100',
+  });
+  const resp = await fetch('/api/klines?' + params.toString());
+  if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error || resp.statusText); }
+  return await resp.json();
+}
+
+async function loadSignals() {
+  const params = new URLSearchParams({
+    ticker: tickerEl.value,
+    interval: document.getElementById('interval').value,
+    limit: document.getElementById('limit').value || '100',
+    volume: document.getElementById('volume-on').checked ? '1' : '0',
+    trend: '0',
+    risk_pct: document.getElementById('risk-pct').value || '5',
+  });
+  // 信号扫描窗口：检查最近多少根 K 线里的信号（决定表格/图表显示多少信号）
+  params.set('scan', document.getElementById('scan').value || '100');
+  // 趋势交易：勾选后启用均线趋势过滤（只顺势交易）
+  const trendOn = document.getElementById('trend-on').checked;
+  if (trendOn) {
+    params.set('trend', document.getElementById('trend-period').value || '50');
+    params.set('ma_type', document.getElementById('ma-type').value || 'sma');
+  }
+  const resp = await fetch('/api/signals?' + params.toString());
+  if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error || resp.statusText); }
+  return await resp.json();
+}
+
+function drawKlines(data) {
+  series.setData(data);
+  volumeSeries.setData(data.map(c => Number.isFinite(c.volume) && c.volume >= 0
+    ? { time:c.time, value:c.volume, color:c.close >= c.open ? '#26a69a99' : '#ef535099' }
+    : { time:c.time }));
+  volumeAverage.setData(data.map((c, i) => {
+    const history = data.slice(i - 20, i);
+    if (i < 20 || history.some(p => !Number.isFinite(p.volume) || p.volume < 0)) return { time:c.time };
+    return { time:c.time, value:history.reduce((sum, p) => sum + p.volume, 0) / 20 };
+  }));
+  chart.timeScale().fitContent();
+}
+
+// 已创建的价格线引用（lightweight-charts 没有 setPriceLines，需逐个 remove）
+let priceLines = [];
+// 当前信号列表 与 图上显示的信号下标（默认显示最新，即下标 0，因为接口返回倒序）
+let currentSignals = [];
+let selectedIndex = 0;
+
+// 结果徽章映射
+const RESULT_META = {
+  WIN:  { cls: 'win',  label: '✅ 成功' },
+  LOSS: { cls: 'loss', label: '❌ 失败' },
+  OPEN: { cls: 'open', label: '⏳ 持仓' },
+};
+
+// 只显示当前选中信号（selectedIndex）的入场/止损/止盈三条水平线。买入=绿, 卖出=红。
+function drawSignals() {
+  // 清空旧价格线与入场标记
+  priceLines.forEach(pl => series.removePriceLine(pl));
+  priceLines = [];
+  series.setMarkers([]);
+  const s = currentSignals[selectedIndex];
+  if (!s) return;
+  const color = COLORS[s.action] || '#787b86';
+  const items = [
+    { key: 'price', style: 0, label: '入场' },
+    { key: 'sl', style: 2, label: '止损' },
+    { key: 'tp', style: 1, label: '止盈' },
+  ];
+  items.forEach(it => {
+    const v = Number(s[it.key]);
+    if (isNaN(v)) return;
+    const pl = series.createPriceLine({
+      price: v,
+      color: color,
+      lineWidth: 1,
+      lineStyle: it.style,          // 0=实线 2=虚线 1=点线
+      axisLabelVisible: true,
+      title: `${s.action} ${it.label} ${v.toFixed(2)}`,
+    });
+    priceLines.push(pl);
+  });
+
+  // 标记入场点所在的 K 线（箭头指示方向）
+  if (s.timestamp != null) {
+    const isBuy = s.action === 'BUY';
+    series.setMarkers([{
+      time: s.timestamp,               // 与 K 线 time 精确对应
+      position: isBuy ? 'belowBar' : 'aboveBar',
+      color: color,
+      shape: isBuy ? 'arrowUp' : 'arrowDown',
+      text: isBuy ? 'BUY' : 'SELL',
+    }]);
+  }
+}
+
+function volumeLabel(s) {
+  if (!Object.hasOwn(s, 'volume_signal')) return '未启用';
+  if (s.volume_ratio == null) return '数据不足';
+  return (s.volume_confirm || '中性量能') + ' · ' + Number(s.volume_ratio).toFixed(2) + '×';
+}
+
+function renderSummary(volumeEnabled) {
+  const count = (key, value) => currentSignals.filter(s => s[key] === value).length;
+  const win = count('result', 'WIN'), loss = count('result', 'LOSS');
+  const open = count('result', 'OPEN'), closed = win + loss;
+  const strong = count('volume_signal', 'strong'), weak = count('volume_signal', 'weak');
+  const unknown = currentSignals.filter(s => s.volume_signal == null).length;
+  const neutral = currentSignals.length - strong - weak - unknown;
+  // 仓位计算汇总
+  const totalContracts = currentSignals.reduce((a, s) => a + (s.suggested_contracts || 0), 0);
+  const totalProfit = currentSignals.reduce((a, s) => a + (s.expected_profit || 0), 0);
+  const totalLoss = currentSignals.reduce((a, s) => a + (s.expected_loss || 0), 0);
+  const avgRR = currentSignals.length
+    ? (currentSignals.reduce((a, s) => a + (s.risk_reward_ratio || 0), 0) / currentSignals.length).toFixed(2)
+    : '—';
+  const riskPct = currentSignals[0]?.risk_pct || 5;
+  const maxTrades = Math.round(100 / riskPct); // 100% / risk% = 最大可并行笔数
+  const metrics = [
+    ['信号总数', currentSignals.length, `买入 ${count('action','BUY')} / 卖出 ${count('action','SELL')} · 过滤后（盈亏比≥1.5）`],
+    ['单笔风险', `${riskPct}%`, `约 ${maxTrades} 笔可并行 · 余额×${riskPct}%风险`],
+    ['平均盈亏比', avgRR, `最高 ${currentSignals.reduce((m,s)=>Math.max(m,s.risk_reward_ratio||0),0).toFixed(2)}`],
+    ['建议总张数', `${totalContracts.toLocaleString()} 张`, `全部信号同时持仓`],
+    ['预计总盈利', `+${totalProfit.toLocaleString('en-US',{maximumFractionDigits:0})} USDT`, '全部止盈时'],
+    ['预计总亏损', `-${totalLoss.toLocaleString('en-US',{maximumFractionDigits:0})} USDT`, '全部止损时'],
+    ['历史结果', `${win} / ${loss} / ${open}`, '成功 / 失败 / 持仓中'],
+    ['已结束信号胜率', closed ? (win / closed * 100).toFixed(1) + '%' : '—', `已结束 ${closed} 个；不含持仓中`],
+  ];
+  if (volumeEnabled) {
+    metrics.push(['量能确认', `${strong} / ${weak}`, `放量 / 缩量 · 中性 ${neutral} · 数据不足 ${unknown}`]);
+  }
+  document.getElementById('signal-summary').innerHTML = metrics.map(([title, value, detail]) =>
+    `<div class="metric"><small>${title}</small><strong>${value}</strong><small>${detail}</small></div>`).join('');
+}
+
+function renderSignalsTable() {
+  const wrap = document.getElementById('signals-table');
+  if (!currentSignals.length) {
+    wrap.innerHTML = '<div class="empty">暂无信号（可能盈亏比不足或仓位不足）</div>';
+    return;
+  }
+  const fmt = (v) => (v == null ? '-' : Number(v).toFixed(2));
+  const fmtInt = (v) => (v == null || v === 0 ? '-' : Number(v).toLocaleString('en-US'));
+  const timeFmt = (t) => new Date(t * 1000).toLocaleString('zh-CN', { hour12: false });
+  const rows = currentSignals.map((s, i) => {
+    const res = RESULT_META[s.result] || { cls: 'open', label: '—' };
+    const selected = (i === selectedIndex) ? ' class="sel"' : '';
+    // 盈亏比颜色：≥2绿色 / ≥1.5黄色 / <1.5红色（后者理论上已被过滤，但防御性显示）
+    const rr = s.risk_reward_ratio || 0;
+    const rrCls = rr >= 2 ? 'win' : rr >= 1.5 ? 'open' : 'loss';
+    // 建议张数是否可下单
+    const canOrder = s.suggested_contracts > 0;
+    return `
+    <tr${selected} data-idx="${i}" title="点击在图上显示该信号">
+      <td><span class="badge ${s.action === 'BUY' ? 'buy' : 'sell'}">${s.action}</span></td>
+      <td class="mono">${s.strategy}</td>
+      <td class="mono">${fmt(s.price)}</td>
+      <td class="mono">${fmt(s.sl)}</td>
+      <td class="mono">${fmt(s.tp)}</td>
+      <td><span class="badge ${rrCls}">${fmt(rr)}</span></td>
+      <td class="mono">${fmtInt(s.suggested_contracts)} 张</td>
+      <td class="mono green">+${fmt(s.expected_profit)}</td>
+      <td class="mono red">-${fmt(s.expected_loss)}</td>
+      <td class="mono" style="color:#b2b5be">-${fmt(s.estimated_fee)}</td>
+      <td><span class="badge ${res.cls}">${res.label}</span></td>
+      <td class="mono">${timeFmt(s.timestamp)}</td>
+      <td>
+        ${canOrder
+          ? `<button class="order-btn" data-idx="${i}">下单 ${fmtInt(s.suggested_contracts)}张</button>`
+          : '<span class="note" style="font-size:11px">仓位不足</span>'}
+      </td>
+    </tr>`;
+  }).join('');
+  wrap.innerHTML = `
+    <table>
+      <thead><tr>
+        <th>方向</th><th>策略</th><th>入场价</th><th>止损价</th><th>止盈价</th>
+        <th>盈亏比</th><th>建议张数</th><th>预计盈利</th><th>预计亏损</th><th>手续费</th><th>结果</th><th>时间</th><th></th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+// 选中某个信号并在图上显示它的入场/止损/止盈
+function selectSignal(i) {
+  if (i < 0 || i >= currentSignals.length) return;
+  selectedIndex = i;
+  drawSignals();
+  renderSignalsTable();   // 重绘以更新选中高亮
+}
+
+// ---- 下单确认弹窗 ----
+let _omSignal = null;   // 当前待下单的信号对象
+let _omAvailBal = 0;    // 可用保证金（USDT）
+const FEE_RATE = 0.0002; // Maker 0.02%（开+平 ×2）
+
+function openOrderModal(idx) {
+  const s = currentSignals[idx];
+  if (!s) return;
+  if ((s.suggested_contracts || 0) <= 0) {
+    toast('warning', '仓位不足', `风险金额不足以下单 ${s.action} ${s.strategy}`);
+    return;
+  }
+  _omSignal = s;
+
+  // 填充弹窗数据
+  document.getElementById('om-side').textContent = s.action;
+  document.getElementById('om-side').className = `badge ${s.action === 'BUY' ? 'buy' : 'sell'}`;
+  document.getElementById('om-strategy').textContent = s.strategy;
+  document.getElementById('om-price').textContent = Number(s.price).toFixed(2);
+  document.getElementById('om-rr').textContent = s.risk_reward_ratio;
+  document.getElementById('om-sl').textContent = Number(s.sl).toFixed(2);
+  document.getElementById('om-tp').textContent = Number(s.tp).toFixed(2);
+
+  // 默认张数 = 建议张数
+  document.getElementById('om-size').value = s.suggested_contracts;
+
+  // 更新确认按钮文字
+  document.getElementById('om-confirm-btn').textContent = `确认下单 ${s.action}`;
+
+  document.getElementById('order-modal').hidden = false;
+  updateOrderModalStats();
+}
+
+function closeOrderModal() {
+  document.getElementById('order-modal').hidden = true;
+  _omSignal = null;
+}
+
+function adjOrderSize(delta) {
+  const el = document.getElementById('om-size');
+  const cur = parseInt(el.value) || 1;
+  el.value = Math.max(1, cur + delta);
+  updateOrderModalStats();
+}
+
+function setOrderSizeMax() {
+  if (!_omSignal) return;
+  document.getElementById('om-size').value = _omSignal.suggested_contracts;
+  updateOrderModalStats();
+}
+
+function updateOrderModalStats() {
+  if (!_omSignal) return;
+  const s = _omSignal;
+  const size = parseInt(document.getElementById('om-size').value) || 1;
+  const price = s.price;
+
+  // 仓位价值
+  const notional = size * 0.01 * price;
+  document.getElementById('om-notional').textContent = notional.toLocaleString('en-US', {maximumFractionDigits:0});
+
+  // 占可用保证金比例
+  const marginPct = _omAvailBal > 0 ? (notional / _omAvailBal * 100).toFixed(1) : '-';
+  const pctEl = document.getElementById('om-margin-pct');
+  pctEl.textContent = marginPct + '%';
+  pctEl.style.color = marginPct > 80 ? '#ef5350' : marginPct > 50 ? '#e6b85c' : '#26a69a';
+
+  // 预计盈亏
+  const riskDist = Math.abs(price - s.sl);
+  const rewardDist = Math.abs(s.tp - price);
+  const profit = size * 0.01 * rewardDist;
+  const loss = size * 0.01 * riskDist;
+  const fee = notional * FEE_RATE * 2;
+  const netProfit = profit - fee;
+
+  document.getElementById('om-profit').textContent = '+' + profit.toFixed(2);
+  document.getElementById('om-loss').textContent = '-' + loss.toFixed(2);
+  document.getElementById('om-fee').textContent = '-' + fee.toFixed(2);
+  document.getElementById('om-net-profit').textContent = '+' + netProfit.toFixed(2);
+  document.getElementById('om-net-profit').style.color = netProfit >= 0 ? '#26a69a' : '#ef5350';
+}
+
+async function confirmOrder() {
+  if (!_omSignal) return;
+  const s = _omSignal;
+  const size = parseInt(document.getElementById('om-size').value) || 1;
+  closeOrderModal();
+
+  setOrderStatus('提交中...');
+  toast('info', '正在下单', `${s.action} ${tickerEl.value} ${s.price} · ${size}张`, 2000);
+  try {
+    const resp = await fetch('/api/order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: s.action, ticker: tickerEl.value,
+        price: s.price, sl: s.sl, tp: s.tp,
+        size: size,
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      const errMsg = data.error || resp.statusText;
+      setOrderStatus(`❌ 下单失败: ${errMsg}`, true);
+      toast('error', '❌ 下单失败', errMsg, 8000);
+      return;
+    }
+    if (data.mock) {
+      const reason = data.mock_reason || '模拟模式';
+      setOrderStatus(`⚠️ ${data.message}（${reason}，订单号 ${data.order_id}）`, true);
+      toast('warning', '⚠️ 未连接真实模拟盘（Mock）', `${data.message}\n原因：${reason}`, 8000);
+    } else {
+      setOrderStatus(`✅ ${data.message}（OKX 订单号 ${data.order_id}）`);
+      toast('success', '✅ 下单成功', `${data.message}\nOKX 订单号：${data.order_id}\n张数：${size}`, 8000);
+    }
+  } catch (e) {
+    setOrderStatus(`❌ 下单出错: ${e.message}`, true);
+    toast('error', '❌ 下单出错', e.message, 8000);
+  }
+}
+
+// 原 placeOrder 改为打开弹窗
+async function placeOrder(idx) {
+  // 先获取可用保证金
+  try {
+    const resp = await fetch(`/api/account?ticker=${encodeURIComponent(tickerEl.value)}`);
+    const data = await resp.json();
+    if (data.balance) {
+      for (const b of data.balance) {
+        for (const d of (b.details || [])) {
+          if (d.ccy === 'USDT') {
+            _omAvailBal = parseFloat(d.availEq || d.availBal || 0);
+            break;
+          }
+        }
+      }
+    }
+  } catch (e) { _omAvailBal = 0; }
+  openOrderModal(idx);
+}
+
+function setOrderStatus(msg, isErr) {
+  const el = document.getElementById('order-status');
+  el.className = isErr ? 'err' : 'ok';
+  el.textContent = msg;
+}
+
+// ---- 全局醒目通知(Toast) ----
+const TOAST_ICONS = { success: '✅', error: '❌', warning: '⚠️', info: 'ℹ️' };
+function toast(type, title, msg, duration = 6000) {
+  const container = document.getElementById('toast-container');
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  const icon = TOAST_ICONS[type] || 'ℹ️';
+  el.innerHTML = `
+    <div class="toast-icon">${icon}</div>
+    <div class="toast-body">
+      <div class="toast-title"></div>
+      <div class="toast-msg"></div>
+    </div>`;
+  el.querySelector('.toast-title').textContent = title;
+  el.querySelector('.toast-msg').textContent = msg || '';
+  // 点击任意处关闭
+  el.addEventListener('click', () => el.remove());
+  container.appendChild(el);
+  // 自动消失
+  setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; setTimeout(() => el.remove(), 320); }, duration);
+}
+
+// ---- 设置（OKX 凭证 + 代理，自动保存到 .env）----
+function setConfigStatus(msg, isErr) {
+  const el = document.getElementById('config-status');
+  el.className = isErr ? 'err' : 'ok';
+  el.textContent = msg;
+}
+
+async function openConfig() {
+  setConfigStatus('读取配置...');
+  document.getElementById('config-modal').hidden = false;
+  try {
+    const resp = await fetch('/api/config');
+    const data = await resp.json();
+    // 脱敏值仅作占位提示；有值时清空输入让用户不误改
+    document.getElementById('cfg-proxy').value = data.proxy || '';
+    document.getElementById('cfg-key').placeholder =
+      data.api_key_masked ? data.api_key_masked : '模拟盘 API Key';
+    document.getElementById('cfg-secret').placeholder =
+      data.secret_masked ? data.secret_masked : '模拟盘 Secret';
+    document.getElementById('cfg-pass').placeholder =
+      data.passphrase_masked ? data.passphrase_masked : '模拟盘 Passphrase';
+    document.getElementById('cfg-key').value = '';
+    document.getElementById('cfg-secret').value = '';
+    document.getElementById('cfg-pass').value = '';
+    const state = data.configured ? '✅ 已配置凭证' : '⚠️ 未配置凭证';
+    setConfigStatus(`${state} · 当前代理 ${data.proxy || '未设置'}`, !data.configured);
+  } catch (e) {
+    setConfigStatus(`读取配置失败: ${e.message}`, true);
+  }
+}
+
+function closeConfig() {
+  document.getElementById('config-modal').hidden = true;
+}
+
+// ---- 账户面板（余额 / 仓位 / 下单历史 / 挂单）----
+let accountVisible = false;
+function toggleAccount() {
+  accountVisible = !accountVisible;
+  const panel = document.getElementById('account-panel');
+  panel.hidden = !accountVisible;
+  if (accountVisible) loadAccount();
+}
+
+function fmtNum(v, d = 2) {
+  if (v == null || v === '' || isNaN(Number(v))) return '-';
+  return Number(v).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+
+function renderBalance(container, balanceArr) {
+  const items = [];
+  for (const b of balanceArr) {
+    for (const d of (b.details || [])) {
+      if (!d.ccy) continue;
+      items.push([
+        d.ccy,
+        fmtNum(d.cashBal),
+        fmtNum(d.availBal),
+        fmtNum(d.availEq),
+      ]);
+    }
+  }
+  if (!items.length) { container.innerHTML = '<div class="empty">暂无资产</div>'; return; }
+  const rows = items.map(r => `<tr><td class="mono">${r[0]}</td><td class="mono">${r[1]}</td><td class="mono">${r[2]}</td><td class="mono">${r[3]}</td></tr>`).join('');
+  container.innerHTML = `<table><thead><tr><th>币种</th><th>总余额</th><th>可用余额</th><th>可用权益</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function renderPositions(container, posArr) {
+  if (!posArr.length) { container.innerHTML = '<div class="empty">当前无持仓</div>'; return; }
+  const rows = posArr.map(p => {
+    const sideBadge = p.posSide === 'long'
+      ? '<span class="badge buy">多</span>' : '<span class="badge sell">空</span>';
+    const pnl = Number(p.upl || 0);
+    const pnlCls = pnl >= 0 ? 'win' : 'loss';
+    return `<tr>
+      <td>${p.instId} ${sideBadge}</td>
+      <td class="mono">${fmtNum(p.pos)}</td>
+      <td class="mono">${fmtNum(p.avgPx)}</td>
+      <td class="mono">${fmtNum(p.markPx)}</td>
+      <td class="mono">${fmtNum(p.upl)}</td>
+      <td class="mono">${fmtNum(p.liqPx)}</td>
+    </tr>`;
+  }).join('');
+  container.innerHTML = `<table><thead><tr><th>合约/方向</th><th>张数</th><th>均价</th><th>标记价</th><th>未实现盈亏</th><th>强平价</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function renderOrders(container, orderArr, isPending) {
+  if (!orderArr.length) { container.innerHTML = '<div class="empty">无' + (isPending ? '挂单' : '已成交订单') + '</div>'; return; }
+  const rows = orderArr.map(o => {
+    const sideBadge = o.side === 'buy'
+      ? '<span class="badge buy">买</span>' : '<span class="badge sell">卖</span>';
+    const t = o.cTime ? new Date(Number(o.cTime)).toLocaleString('zh-CN', { hour12: false }) : '-';
+    const fillPx = isPending ? o.px : o.fillPx || o.avgPx;
+    return `<tr>
+      <td>${sideBadge}</td>
+      <td class="mono">${fmtNum(o.sz)}</td>
+      <td class="mono">${fmtNum(fillPx)}</td>
+      <td class="mono">${fmtNum(o.ordId)}</td>
+      <td class="mono">${t}</td>
+    </tr>`;
+  }).join('');
+  const colHead = isPending ? '<th>委托价</th>' : '<th>成交价</th>';
+  container.innerHTML = `<table><thead><tr><th>方向</th><th>数量</th>${colHead}<th>订单号</th><th>时间</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+async function loadAccount() {
+  const balanceEl = document.getElementById('account-balance');
+  const posEl = document.getElementById('account-positions');
+  const pendingEl = document.getElementById('account-pending');
+  const ordersEl = document.getElementById('account-orders');
+  const errEl = document.getElementById('account-err');
+  const mockEl = document.getElementById('account-mock');
+  errEl.hidden = true; mockEl.hidden = true;
+  balanceEl.textContent = '加载中...'; posEl.textContent = '加载中...';
+  pendingEl.textContent = '加载中...'; ordersEl.textContent = '加载中...';
+  try {
+    const resp = await fetch(`/api/account?ticker=${encodeURIComponent(tickerEl.value)}`);
+    const data = await resp.json();
+    if (!resp.ok) {
+      errEl.textContent = `查询失败: ${data.error || resp.statusText}`; errEl.hidden = false;
+      balanceEl.textContent = '-'; posEl.textContent = '-'; pendingEl.textContent = '-'; ordersEl.textContent = '-';
+      return;
+    }
+    if (data.mock) {
+      mockEl.textContent = `⚠️ ${data.mock_reason || '未配置凭证'}（仅展示模拟数据/暂无）`;
+      mockEl.hidden = false;
+      balanceEl.textContent = '-'; posEl.textContent = '-'; pendingEl.textContent = '-'; ordersEl.textContent = '-';
+      return;
+    }
+    renderBalance(balanceEl, data.balance || []);
+    renderPositions(posEl, data.positions || []);
+    renderOrders(pendingEl, data.pending || [], true);
+    renderOrders(ordersEl, data.orders || [], false);
+  } catch (e) {
+    errEl.textContent = `查询出错: ${e.message}`; errEl.hidden = false;
+  }
+}
+
+async function saveConfig() {
+  const payload = {};
+  // 只提交用户填写/修改的字段；留空表示不修改该项
+  const fields = {
+    'OKX_API_KEY': 'cfg-key',
+    'OKX_API_SECRET': 'cfg-secret',
+    'OKX_PASSPHRASE': 'cfg-pass',
+    'OKX_PROXY': 'cfg-proxy',
+  };
+  for (const [key, id] of Object.entries(fields)) {
+    const el = document.getElementById(id);
+    if (el.value.trim() !== '') payload[key] = el.value.trim();
+  }
+  if (Object.keys(payload).length === 0) {
+    setConfigStatus('没有可保存的改动：请填写至少一项', true);
+    toast('warning', '未保存', '没有可保存的改动，请填写至少一项');
+    return;
+  }
+  setConfigStatus('保存中...');
+  try {
+    const resp = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      const errMsg = data.error || resp.statusText;
+      setConfigStatus(`保存失败: ${errMsg}`, true);
+      toast('error', '❌ 保存失败', errMsg);
+      return;
+    }
+    if (data.client_ok) {
+      setConfigStatus(`✅ 已保存并生效（凭证 ${data.configured ? '完整' : '不完整'}，可正常连接模拟盘）`);
+      // 保存成功自动关闭弹窗，并在主状态栏显示结果
+      closeConfig();
+      setStatus(`设置已保存并生效 · 凭证 ${data.configured ? '完整' : '不完整'}`);
+      toast('success', '✅ 设置已保存并生效',
+        `凭证 ${data.configured ? '完整' : '不完整'}，已连接模拟盘`);
+    } else {
+      setConfigStatus(`✅ 已保存，但连接异常：${data.client_error || '未知'}`, true);
+      toast('warning', '⚠️ 已保存，但连接异常', data.client_error || '未知', 8000);
+    }
+  } catch (e) {
+    setConfigStatus(`保存出错: ${e.message}`, true);
+    toast('error', '❌ 保存出错', e.message);
+  }
+}
+
+// ---- 主流程 ----
+let refreshVersion = 0;
+async function refreshAll() {
+  const version = ++refreshVersion;
+  const volumeEnabled = document.getElementById('volume-on').checked;
+  setStatus('加载中...');
+  try {
+    const [klines, signals] = await Promise.all([loadKlines(), loadSignals()]);
+    if (version !== refreshVersion) return;
+    drawKlines(klines);
+    // 更新信号列表；接口返回时间倒序(最新在前)，默认选中最新(0)
+    currentSignals = signals;
+    if (selectedIndex >= currentSignals.length) selectedIndex = 0;
+    drawSignals();
+    renderSignalsTable();
+    renderSummary(volumeEnabled);
+    setStatus(`已更新 · ${klines.length} 根K线 · ${signals.length} 个信号`);
+  } catch (e) {
+    if (version !== refreshVersion) return;
+    setStatus(`加载失败，当前显示上次成功数据: ${e.message}`, 'err');
+    toast('error', '❌ 数据加载失败', `当前显示上次成功数据：${e.message}`);
+  }
+}
+
+document.getElementById('volume-on').addEventListener('change', refreshAll);
+document.getElementById('volume-visible').addEventListener('change', toggleVolumeChart);
+
+// ---- 表格事件委托（点击行切换信号，点击下单按钮下单）----
+document.getElementById('signals-table').addEventListener('click', (e) => {
+  const btn = e.target.closest('.order-btn');
+  if (btn) {
+    // 点击「下单」按钮：先选中该信号，再下单
+    const idx = Number(btn.dataset.idx);
+    selectSignal(idx);
+    placeOrder(idx);
+    return;
+  }
+  const tr = e.target.closest('tr[data-idx]');
+  if (tr) {
+    selectSignal(Number(tr.dataset.idx));
+  }
+});
+
+// 自动轮询
+document.getElementById('poll').addEventListener('change', (e) => {
+  if (e.target.checked) {
+    window.__pollTimer = setInterval(refreshAll, POLL_MS);
+  } else if (window.__pollTimer) {
+    clearInterval(window.__pollTimer);
+    window.__pollTimer = null;
+  }
+});
+
+// 初始加载
+refreshAll();
+
+// 窗口尺寸变化时重绘
+window.addEventListener('resize', () => {
+  chart.applyOptions({ width: chartEl.clientWidth });
+});
+</script>
+</body>
+</html>
