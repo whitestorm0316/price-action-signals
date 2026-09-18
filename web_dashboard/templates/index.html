@@ -120,28 +120,17 @@
     </label>
     <label>K线数量 <input id="limit" type="number" value="100" min="30" max="3000" style="width:70px" title="最多3000；OKX最近行情端点约保留1440根(5m/1H)，超出部分拉不到"></label>
     <label>扫描窗口 <input id="scan" type="number" value="100" min="10" max="3000" style="width:70px" title="检查最近多少根K线里的信号"></label>
-    <label>单笔风险 <input id="risk-pct" type="number" value="5" min="1" max="15" step="0.5" style="width:60px" onchange="refreshAll()" title="每次下单风险占总权益的比例(%)
-10-20笔可并行 = 风险5%
-5-10笔可并行 = 风险10%">%</label>
-    <label style="display:flex;align-items:center;gap:4px;">
-      <input id="trend-on" type="checkbox"> 趋势交易
-    </label>
-    <label>均线 <input id="trend-period" type="number" value="50" min="5" max="200" style="width:60px"></label>
-    <label>类型
-      <select id="ma-type">
-        <option value="sma" selected>SMA</option>
-        <option value="ema">EMA</option>
-      </select>
-    </label>
     <label title="仅确认或降级价格行为信号；缩量且盈亏比小于2时过滤">
-      <input id="volume-on" type="checkbox"> 量能确认
+      <input id="volume-on" type="checkbox" checked> 量能确认
     </label>
     <label><input id="volume-visible" type="checkbox" checked> 显示成交量</label>
     <button onclick="refreshAll()">刷新</button>
     <button class="secondary" onclick="openConfig()">设置</button>
+    <button class="secondary" onclick="openTrendSettings()" title="趋势交易：均线过滤+方向过滤">📈 趋势</button>
     <button class="secondary" onclick="toggleAccount()" title="查看余额 / 当前仓位 / 下单历史 / 挂单">账户</button>
+    <button class="secondary" id="auto-trade-btn" onclick="toggleAutoTrade()" title="自动交易：扫描信号并自动下单">🤖 自动</button>
     <label style="display:flex;align-items:center;gap:4px;" data-page-node-id="6t4MDdmf52yDprbXyYw844">
-      <input id="poll" type="checkbox" data-page-node-id="6GnxhZrPuTd2WG0722pfEV"> 自动轮询(30s)
+      <input id="poll" type="checkbox" checked data-page-node-id="6GnxhZrPuTd2WG0722pfEV"> 自动轮询(30s)
     </label>
     <span id="status" data-page-node-id="wkyN2LGbKfdy38lC1KaaZs"></span>
   </div>
@@ -179,8 +168,10 @@
     </div>
   </div>
 
-  <!-- 账户面板 -->
-  <div id="account-panel" class="table-wrap" hidden>
+  <!-- 账户弹窗 -->
+  <div id="account-panel" class="modal-overlay" hidden>
+    <div class="modal" style="width:min(600px,95vw);position:relative;">
+    <button class="secondary" onclick="closeAccount()" title="关闭 (Esc)" style="position:absolute;top:10px;right:10px;width:28px;height:28px;padding:0;font-size:16px;line-height:1;border-radius:6px;">×</button>
     <h2>我的账户 <button class="secondary" onclick="loadAccount()" style="margin-left:8px;padding:3px 10px;font-size:12px;">刷新</button></h2>
     <div id="account-err" class="err" hidden></div>
     <div id="account-mock" class="note" hidden></div>
@@ -198,8 +189,109 @@
     <div id="account-orders" class="empty" style="padding:8px;">加载中...</div>
   </div>
 
+    </div>
+  </div>
+
+  <!-- 自动交易弹窗 -->
+  <div id="auto-trade-modal" class="modal-overlay" hidden>
+    <div class="modal" style="width:min(480px,95vw)">
+      <h2>🤖 自动交易设置</h2>
+
+      <div style="margin:12px 0;">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+          <input id="at-enabled" type="checkbox" onchange="updateAutoTrade()">
+          <span style="font-weight:600;">启用自动交易</span>
+        </label>
+        <div id="at-status" class="note" style="margin-top:4px;">未启用</div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:12px 0;font-size:13px;">
+        <label>扫描周期
+          <select id="at-interval" onchange="updateAutoTrade()" style="width:100%;background:#131722;color:#d1d4dc;border:1px solid #363a45;border-radius:4px;padding:4px;margin-top:2px;">
+            <option value="5m" selected>5分钟</option>
+            <option value="15m">15分钟</option>
+            <option value="1H">1小时</option>
+          </select>
+        </label>
+        <label>扫描窗口
+          <input id="at-scan" type="number" value="50" min="10" max="300" style="width:100%;background:#131722;color:#d1d4dc;border:1px solid #363a45;border-radius:4px;padding:4px;margin-top:2px;">
+        </label>
+        <label>最大同时持仓
+          <input id="at-max" type="number" value="10" min="1" max="50" style="width:100%;background:#131722;color:#d1d4dc;border:1px solid #363a45;border-radius:4px;padding:4px;margin-top:2px;">
+        </label>
+        <label>冷却时间（秒）
+          <input id="at-cooldown" type="number" value="300" min="60" max="3600" step="60" style="width:100%;background:#131722;color:#d1d4dc;border:1px solid #363a45;border-radius:4px;padding:4px;margin-top:2px;">
+        </label>
+        <label>最小盈亏比
+          <input id="at-rr" type="number" value="1.5" min="1" max="5" step="0.1" style="width:100%;background:#131722;color:#d1d4dc;border:1px solid #363a45;border-radius:4px;padding:4px;margin-top:2px;">
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:18px;">
+          <input id="at-volume" type="checkbox"> 量能过滤
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:18px;">
+          <input id="at-trend" type="checkbox" onchange="document.getElementById('at-trend-period').disabled=!this.checked"> 趋势过滤
+        </label>
+        <label>均线周期
+          <input id="at-trend-period" type="number" value="50" min="5" max="200" disabled style="width:100%;background:#131722;color:#d1d4dc;border:1px solid #363a45;border-radius:4px;padding:4px;margin-top:2px;">
+        </label>
+      </div>
+
+      <div style="margin:12px 0;">
+        <div style="font-size:13px;color:#b2b5be;margin-bottom:4px;">最近自动交易日志</div>
+        <div id="at-log" style="background:#131722;border-radius:4px;padding:8px;max-height:150px;overflow-y:auto;font-size:12px;font-family:monospace;color:#b2b5be;">暂无日志</div>
+      </div>
+
+      <div class="modal-actions">
+        <button class="secondary" onclick="closeAutoTrade()">关闭</button>
+        <button class="order-btn" onclick="saveAutoTrade()" style="padding:6px 16px;">保存设置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 趋势交易设置弹窗 -->
+  <div id="trend-modal" class="modal-overlay" hidden>
+    <div class="modal" style="width:min(460px,95vw)">
+      <h2>📈 趋势交易设置</h2>
+      <p class="note">趋势过滤：只顺势交易。价格在均线上方→只做多；下方→只做空。</p>
+
+      <div style="margin:16px 0;">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+          <input id="trend-enabled" type="checkbox" checked>
+          <span style="font-weight:600;">启用趋势过滤</span>
+        </label>
+        <div id="trend-status" class="note" style="margin-top:4px;">未启用 · 信号不过滤方向</div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:16px 0;font-size:13px;">
+        <label>均线类型
+          <select id="trend-ma-type" style="width:100%;background:#131722;color:#d1d4dc;border:1px solid #363a45;border-radius:4px;padding:6px;margin-top:2px;">
+            <option value="sma" selected>SMA（简单移动平均）</option>
+            <option value="ema">EMA（指数移动平均）</option>
+          </select>
+        </label>
+        <label>均线周期
+          <input id="trend-ma-period" type="number" value="50" min="5" max="200" style="width:100%;background:#131722;color:#d1d4dc;border:1px solid #363a45;border-radius:4px;padding:6px;margin-top:2px;">
+        </label>
+      </div>
+
+      <div style="background:#131722;border-radius:6px;padding:12px;margin:12px 0;font-size:12px;color:#b2b5be;">
+        <div style="font-weight:600;margin-bottom:6px;color:#d1d4dc;">趋势判断规则</div>
+        <div>• 价格 > MA → <span class="green">上升趋势</span> → 只允许 <span class="badge buy">BUY</span></div>
+        <div>• 价格 < MA → <span class="red">下降趋势</span> → 只允许 <span class="badge sell">SELL</span></div>
+        <div>• 价格 ≈ MA → 横盘 → 两种信号都保留</div>
+        <div style="margin-top:6px;">• 建议周期：5m用 MA20~50，1H用 MA50~100</div>
+      </div>
+
+      <div class="modal-actions">
+        <button class="secondary" onclick="closeTrendSettings()">关闭</button>
+        <button class="order-btn" onclick="saveTrendSettings()" style="padding:6px 16px;">保存并刷新</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 下单确认弹窗 -->
   <div id="order-modal" class="modal-overlay" hidden>
+
     <div class="modal" style="width:min(500px,95vw)">
       <h2 id="order-modal-title">确认下单</h2>
 
@@ -331,15 +423,17 @@ async function loadSignals() {
     limit: document.getElementById('limit').value || '100',
     volume: document.getElementById('volume-on').checked ? '1' : '0',
     trend: '0',
-    risk_pct: document.getElementById('risk-pct').value || '5',
   });
   // 信号扫描窗口：检查最近多少根 K 线里的信号（决定表格/图表显示多少信号）
   params.set('scan', document.getElementById('scan').value || '100');
   // 趋势交易：勾选后启用均线趋势过滤（只顺势交易）
-  const trendOn = document.getElementById('trend-on').checked;
+  const trendOnEl = document.getElementById('trend-on');
+  const trendOn = trendOnEl ? trendOnEl.checked : true;  // 默认开启
   if (trendOn) {
-    params.set('trend', document.getElementById('trend-period').value || '50');
-    params.set('ma_type', document.getElementById('ma-type').value || 'sma');
+    const trendPeriodEl = document.getElementById('trend-period');
+    const maTypeEl = document.getElementById('ma-type');
+    params.set('trend', trendPeriodEl ? trendPeriodEl.value : '50');
+    params.set('ma_type', maTypeEl ? maTypeEl.value : 'sma');
   }
   const resp = await fetch('/api/signals?' + params.toString());
   if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error || resp.statusText); }
@@ -433,11 +527,12 @@ function renderSummary(volumeEnabled) {
   const avgRR = currentSignals.length
     ? (currentSignals.reduce((a, s) => a + (s.risk_reward_ratio || 0), 0) / currentSignals.length).toFixed(2)
     : '—';
-  const riskPct = currentSignals[0]?.risk_pct || 5;
-  const maxTrades = Math.round(100 / riskPct); // 100% / risk% = 最大可并行笔数
+  const riskPct = currentSignals[0]?.risk_pct || 1;
+  const positionPct = currentSignals[0]?.position_pct || 10;
+  const maxTrades = Math.round(100 / positionPct); // 100% / position% = 最大可并行笔数
   const metrics = [
     ['信号总数', currentSignals.length, `买入 ${count('action','BUY')} / 卖出 ${count('action','SELL')} · 过滤后（盈亏比≥1.5）`],
-    ['单笔风险', `${riskPct}%`, `约 ${maxTrades} 笔可并行 · 余额×${riskPct}%风险`],
+    ['仓位管理', `${positionPct}% 仓位（价格行为止损止盈）`, `每笔仓位=总权益×${positionPct}% · 最大并行~${maxTrades}笔`],
     ['平均盈亏比', avgRR, `最高 ${currentSignals.reduce((m,s)=>Math.max(m,s.risk_reward_ratio||0),0).toFixed(2)}`],
     ['建议总张数', `${totalContracts.toLocaleString()} 张`, `全部信号同时持仓`],
     ['预计总盈利', `+${totalProfit.toLocaleString('en-US',{maximumFractionDigits:0})} USDT`, '全部止盈时'],
@@ -546,6 +641,198 @@ function closeOrderModal() {
   _omSignal = null;
 }
 
+// ---- 趋势交易设置 ----
+// 页面加载时初始化隐藏的趋势控件（默认开启）
+(function() {
+  let el = document.getElementById('trend-on');
+  if (!el) { el = document.createElement('input'); el.type = 'hidden'; el.id = 'trend-on'; document.body.appendChild(el); }
+  el.checked = true;
+  el = document.getElementById('trend-period');
+  if (!el) { el = document.createElement('input'); el.type = 'hidden'; el.id = 'trend-period'; document.body.appendChild(el); }
+  if (!el.value) el.value = '50';
+  el = document.getElementById('ma-type');
+  if (!el) { el = document.createElement('select'); el.id = 'ma-type'; el.style.display = 'none'; document.body.appendChild(el); }
+  if (!el.value) el.value = 'sma';
+})();
+
+function openTrendSettings() {
+  const trendOn = document.getElementById('trend-on');
+  const trendPeriod = document.getElementById('trend-period');
+  const maType = document.getElementById('ma-type');
+  document.getElementById('trend-enabled').checked = trendOn ? trendOn.checked : true;
+  document.getElementById('trend-ma-period').value = trendPeriod ? trendPeriod.value : 50;
+  document.getElementById('trend-ma-type').value = maType ? maType.value : 'sma';
+  updateTrendStatus();
+  document.getElementById('trend-modal').hidden = false;
+}
+
+function closeTrendSettings() {
+  document.getElementById('trend-modal').hidden = true;
+}
+
+function updateTrendStatus() {
+  const enabled = document.getElementById('trend-enabled').checked;
+  const period = document.getElementById('trend-ma-period').value;
+  const type = document.getElementById('trend-ma-type').value.toUpperCase();
+  const el = document.getElementById('trend-status');
+  if (enabled) {
+    el.textContent = `✅ 已启用 · ${type} ${period} 周期 · 只顺势交易`;
+    el.style.color = '#26a69a';
+  } else {
+    el.textContent = '未启用 · 信号不过滤方向';
+    el.style.color = '#b2b5be';
+  }
+}
+
+// 绑定实时状态更新
+document.addEventListener('DOMContentLoaded', () => {
+  const trendEnabled = document.getElementById('trend-enabled');
+  const trendPeriod = document.getElementById('trend-ma-period');
+  const trendMaType = document.getElementById('trend-ma-type');
+  if (trendEnabled) trendEnabled.addEventListener('change', updateTrendStatus);
+  if (trendPeriod) trendPeriod.addEventListener('change', updateTrendStatus);
+  if (trendMaType) trendMaType.addEventListener('change', updateTrendStatus);
+});
+
+async function saveTrendSettings() {
+  // 更新隐藏的旧控件（loadSignals 读取这些值）
+  const enabled = document.getElementById('trend-enabled').checked;
+  const period = document.getElementById('trend-ma-period').value;
+  const type = document.getElementById('trend-ma-type').value;
+
+  // 保持隐藏控件同步
+  let trendOn = document.getElementById('trend-on');
+  if (!trendOn) {
+    // 如果旧控件被移除了，创建隐藏input
+    trendOn = document.createElement('input');
+    trendOn.type = 'hidden';
+    trendOn.id = 'trend-on';
+    document.body.appendChild(trendOn);
+  }
+  trendOn.checked = enabled;
+
+  let trendPeriodEl = document.getElementById('trend-period');
+  if (!trendPeriodEl) {
+    trendPeriodEl = document.createElement('input');
+    trendPeriodEl.type = 'hidden';
+    trendPeriodEl.id = 'trend-period';
+    document.body.appendChild(trendPeriodEl);
+  }
+  trendPeriodEl.value = period;
+
+  let maTypeEl = document.getElementById('ma-type');
+  if (!maTypeEl) {
+    maTypeEl = document.createElement('select');
+    maTypeEl.id = 'ma-type';
+    maTypeEl.style.display = 'none';
+    document.body.appendChild(maTypeEl);
+  }
+  maTypeEl.value = type;
+
+  closeTrendSettings();
+  toast('success', '✅ 趋势设置已保存', `${enabled ? '启用' : '关闭'} ${type} ${period}周期`);
+  refreshAll();
+}
+
+// ---- 自动交易 ----
+let _autoTradeVisible = false;
+function toggleAutoTrade() {
+  _autoTradeVisible = !_autoTradeVisible;
+  document.getElementById('auto-trade-modal').hidden = !_autoTradeVisible;
+  if (_autoTradeVisible) loadAutoTradeStatus();
+}
+
+function closeAutoTrade() {
+  document.getElementById('auto-trade-modal').hidden = true;
+  _autoTradeVisible = false;
+}
+
+async function loadAutoTradeStatus() {
+  try {
+    const resp = await fetch('/api/auto-trade');
+    const data = await resp.json();
+    const cfg = data.config;
+    document.getElementById('at-enabled').checked = cfg.enabled;
+    document.getElementById('at-interval').value = cfg.interval;
+    document.getElementById('at-scan').value = cfg.scan_window;
+    document.getElementById('at-max').value = cfg.max_open_trades;
+    document.getElementById('at-cooldown').value = cfg.cooldown_seconds;
+    document.getElementById('at-rr').value = cfg.min_rr_ratio;
+    document.getElementById('at-volume').checked = cfg.volume_filter;
+    document.getElementById('at-trend').checked = cfg.trend_filter || (cfg.trend_period > 0);
+    document.getElementById('at-trend-period').value = cfg.trend_period || 50;
+    document.getElementById('at-trend-period').disabled = !(cfg.trend_filter || cfg.trend_period > 0);
+
+    // 状态
+    const statusEl = document.getElementById('at-status');
+    statusEl.textContent = cfg.enabled ? '✅ 运行中 · 每30秒扫描' : '⏸️ 已停止';
+    statusEl.style.color = cfg.enabled ? '#26a69a' : '#b2b5be';
+
+    // 按钮颜色
+    const btn = document.getElementById('auto-trade-btn');
+    btn.style.background = cfg.enabled ? '#26a69a' : '';
+    btn.style.color = cfg.enabled ? '#fff' : '';
+
+    // 日志
+    const logEl = document.getElementById('at-log');
+    if (data.log.length === 0) {
+      logEl.innerHTML = '<div style="color:#666">暂无日志</div>';
+    } else {
+      logEl.innerHTML = data.log.map(l => {
+        const cls = l.success === true ? 'color:#26a69a' : l.success === false ? 'color:#ef5350' : 'color:#b2b5be';
+        return `<div style="${cls};margin-bottom:2px;">[${l.time}] ${l.msg}</div>`;
+      }).reverse().join('');
+    }
+  } catch (e) {
+    console.error('加载自动交易状态失败:', e);
+  }
+}
+
+async function updateAutoTrade() {
+  // 开关变化时立即更新状态
+  const enabled = document.getElementById('at-enabled').checked;
+  try {
+    await fetch('/api/auto-trade', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    });
+    loadAutoTradeStatus();
+    toast(enabled ? 'success' : 'info',
+      enabled ? '🤖 自动交易已启用' : '⏸️ 自动交易已停止',
+      enabled ? '每30秒扫描信号并自动下单' : '自动交易已停止');
+  } catch (e) {
+    toast('error', '设置失败', e.message);
+  }
+}
+
+async function saveAutoTrade() {
+  const cfg = {
+    enabled: document.getElementById('at-enabled').checked,
+    interval: document.getElementById('at-interval').value,
+    scan_window: parseInt(document.getElementById('at-scan').value) || 50,
+    max_open_trades: parseInt(document.getElementById('at-max').value) || 10,
+    cooldown_seconds: parseInt(document.getElementById('at-cooldown').value) || 300,
+    min_rr_ratio: parseFloat(document.getElementById('at-rr').value) || 1.5,
+    volume_filter: document.getElementById('at-volume').checked,
+    trend_filter: document.getElementById('at-trend').checked,
+    trend_period: document.getElementById('at-trend').checked ? parseInt(document.getElementById('at-trend-period').value) || 50 : 0,
+    ma_type: 'sma',
+  };
+  try {
+    const resp = await fetch('/api/auto-trade', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg),
+    });
+    const data = await resp.json();
+    toast('success', '✅ 设置已保存', `自动交易: ${cfg.enabled ? '启用' : '停止'}\n扫描周期: ${cfg.interval} · 最大持仓: ${cfg.max_open_trades}`);
+    loadAutoTradeStatus();
+  } catch (e) {
+    toast('error', '保存失败', e.message);
+  }
+}
+
 function adjOrderSize(delta) {
   const el = document.getElementById('om-size');
   const cur = parseInt(el.value) || 1;
@@ -575,18 +862,16 @@ function updateOrderModalStats() {
   pctEl.textContent = marginPct + '%';
   pctEl.style.color = marginPct > 80 ? '#ef5350' : marginPct > 50 ? '#e6b85c' : '#26a69a';
 
-  // 预计盈亏
-  const riskDist = Math.abs(price - s.sl);
-  const rewardDist = Math.abs(s.tp - price);
-  const profit = size * 0.01 * rewardDist;
-  const loss = size * 0.01 * riskDist;
+  // 预计盈亏（用信号原始 SL/TP）
+  const profit = size * 0.01 * Math.abs(s.tp - price);
+  const loss = size * 0.01 * Math.abs(price - s.sl);
   const fee = notional * FEE_RATE * 2;
   const netProfit = profit - fee;
 
   document.getElementById('om-profit').textContent = '+' + profit.toFixed(2);
   document.getElementById('om-loss').textContent = '-' + loss.toFixed(2);
   document.getElementById('om-fee').textContent = '-' + fee.toFixed(2);
-  document.getElementById('om-net-profit').textContent = '+' + netProfit.toFixed(2);
+  document.getElementById('om-net-profit').textContent = (netProfit >= 0 ? '+' : '') + netProfit.toFixed(2);
   document.getElementById('om-net-profit').style.color = netProfit >= 0 ? '#26a69a' : '#ef5350';
 }
 
@@ -719,6 +1004,11 @@ function toggleAccount() {
   const panel = document.getElementById('account-panel');
   panel.hidden = !accountVisible;
   if (accountVisible) loadAccount();
+}
+
+function closeAccount() {
+  accountVisible = false;
+  document.getElementById('account-panel').hidden = true;
 }
 
 function fmtNum(v, d = 2) {
@@ -890,6 +1180,32 @@ async function refreshAll() {
 
 document.getElementById('volume-on').addEventListener('change', refreshAll);
 document.getElementById('volume-visible').addEventListener('change', toggleVolumeChart);
+
+// ---- 弹窗统一交互：ESC 关闭 + 点遮罩关闭 ----
+const _modalCloseMap = {
+  'config-modal': closeConfig,
+  'auto-trade-modal': closeAutoTrade,
+  'trend-modal': closeTrendSettings,
+  'order-modal': closeOrderModal,
+  'account-panel': closeAccount,
+};
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    for (const [id, fn] of Object.entries(_modalCloseMap)) {
+      const el = document.getElementById(id);
+      if (el && !el.hidden) { fn(); return; }
+    }
+  }
+});
+// 点遮罩（modal-overlay 自身）关闭；点 .modal 内容不关闭
+document.querySelectorAll('.modal-overlay').forEach((overlay) => {
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) {
+      const fn = _modalCloseMap[overlay.id];
+      if (fn) fn(); else overlay.hidden = true;
+    }
+  });
+});
 
 // ---- 表格事件委托（点击行切换信号，点击下单按钮下单）----
 document.getElementById('signals-table').addEventListener('click', (e) => {

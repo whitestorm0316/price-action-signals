@@ -32,8 +32,6 @@ from webhook_server.okx_trading import OKXConfigError, OKXTradeError, OKXTrading
 app = Flask(__name__)
 # 模板改动自动重载，避免每次改模板都要重启服务
 app.config["TEMPLATES_AUTO_RELOAD"] = True
-# 模板改动自动重载，避免每次改模板都要重启服务
-app.config["TEMPLATES_AUTO_RELOAD"] = True
 
 # ---------------------------------------------------------------------------
 # .env 配置加载（含敏感凭证），支持 前端设置 -> 自动保存到 .env
@@ -115,7 +113,6 @@ ALLOWED_TICKERS = {"BTC-USDT-SWAP"}
 CONTRACT_BTC = 0.01
 
 # 风险参数
-RISK_PCT = 0.05             # 每笔风险 = 余额 × 5%（可并行10-20笔）
 MIN_RISK_REWARD = 1.5       # 最小盈亏比阈值（低于此值不显示）
 MIN_CONTRACTS = 1           # OKX BTC-USDT-SWAP 最小下单量：1张
 
@@ -162,7 +159,7 @@ def reset_trade_client() -> None:
 
 
 def get_usdt_balance() -> float:
-    """获取 USDT 可用余额；凭证缺失或异常返回 0（不下单/不计算）。"""
+    """获取 USDT 总权益（eq）；凭证缺失或异常返回 0。"""
     client, _ = get_trade_client()
     if client is None:
         return 0.0
@@ -171,7 +168,8 @@ def get_usdt_balance() -> float:
         for b in balance:
             for d in (b.get("details") or []):
                 if d.get("ccy") == "USDT":
-                    return float(d.get("availEq") or d.get("availBal") or 0)
+                    # 优先用 eq（总权益），其次 availBal（可用余额）
+                    return float(d.get("eq") or d.get("availBal") or 0)
     except Exception:  # noqa: BLE001
         return 0.0
     return 0.0
@@ -182,23 +180,20 @@ def enrich_signals_with_risk(
     balance: float,
     risk_pct: float | None = None,
 ) -> list[dict]:
-    """给每个信号附加风险计算字段并过滤。
+    """仓位管理：总权益×10%下注，止损止盈用价格行为学原始SL/TP。
 
     计算公式：
-        risk_amount = balance × risk_pct (默认5%)
-        risk_distance = |entry - sl| (价格距离)
-        risk_contracts = floor(risk_amount / (risk_distance × CONTRACT_BTC))
+        position_value = balance × 10%（总权益的10%）
+        suggested_contracts = position_value / (CONTRACT_BTC × entry)
+        保证金上限 = available × 0.80 → margin_contracts
+        final_contracts = min(suggested_contracts, margin_contracts)
 
-        可用保证金上限 = balance × 0.80 (留 20% 安全余量)
-        margin_contracts = floor(可用保证金上限 / (CONTRACT_BTC × entry))
-
-        suggested_contracts = min(risk_contracts, margin_contracts)
-        expected_profit = suggested × |tp - entry| × CONTRACT_BTC
-        expected_loss   = suggested × |entry - sl| × CONTRACT_BTC
+        SL/TP 用信号原始价格（Pinbar/Engulfing 的 pattern.stop / pattern.take_profit）
+        expected_loss = final × |entry - sl| × CONTRACT_BTC
+        expected_profit = final × |tp - entry| × CONTRACT_BTC
     """
-    _risk_pct = (risk_pct / 100.0) if risk_pct is not None else RISK_PCT
-    risk_amount = balance * _risk_pct  # 美元风险金额
-    safe_balance = balance * 0.80
+    POSITION_PCT = 0.10       # 每笔仓位 = 总权益 × 10%
+    safe_balance = balance * 0.80  # 保证金上限留20%余量
     filtered = []
 
     for sig in signals:
@@ -209,50 +204,48 @@ def enrich_signals_with_risk(
         if not all([entry, sl, tp, entry > 0]):
             continue
 
+        # 用信号本身的盈亏比过滤（不过滤则显示太多低质量信号）
         risk_distance = abs(entry - sl)
         reward_distance = abs(tp - entry)
-
-        # 盈亏比
         rr_ratio = round(reward_distance / risk_distance, 2) if risk_distance > 0 else 0
         sig["risk_reward_ratio"] = rr_ratio
 
-        # 风险计算张数（基于止损距离）
-        if risk_distance > 0 and balance > 0:
-            risk_contracts = int(risk_amount / (risk_distance * CONTRACT_BTC))
-            risk_contracts = max(risk_contracts, 0)
-        else:
-            risk_contracts = 0
-
-        # 保证金计算张数（基于可用权益）
+        # ---- 仓位计算 ----
+        position_value = balance * POSITION_PCT  # 总权益的10%
         notional_per = CONTRACT_BTC * entry
+
+        # 建议张数（基于总权益10%仓位）
+        suggested = int(position_value / notional_per) if notional_per > 0 else 0
+        suggested = max(suggested, 0)
+
+        # 保证金上限（可用余额×80%）
         margin_contracts = int(safe_balance / notional_per) if notional_per > 0 else 0
         margin_contracts = max(margin_contracts, 0)
 
-        # 最终建议张数
-        suggested = min(risk_contracts, margin_contracts)
-        sig["suggested_contracts"] = suggested
+        # 最终张数：取两者最小值
+        final = min(suggested, margin_contracts)
+        sig["suggested_contracts"] = final
 
-        # 建议金额（USDT）
-        sig["suggested_value"] = round(suggested * CONTRACT_BTC * entry, 2)
+        # 实际仓位价值
+        actual_position = final * notional_per
+        sig["suggested_value"] = round(actual_position, 2)
 
-        # 预计盈利/亏损（USDT）—— 按建议张数计算
-        notional = suggested * CONTRACT_BTC * entry
-        sig["expected_profit"] = round(suggested * reward_distance * CONTRACT_BTC, 2)
-        sig["expected_loss"] = round(suggested * risk_distance * CONTRACT_BTC, 2)
+        # ---- 预计盈亏（用信号原始SL/TP，价格行为学）----
+        sig["expected_profit"] = round(final * reward_distance * CONTRACT_BTC, 2)
+        sig["expected_loss"] = round(final * risk_distance * CONTRACT_BTC, 2)
 
-        # 手续费估算（开仓+平仓，按 Maker 0.02% 计算）
-        sig["estimated_fee"] = round(notional * FEE_RATE_MAKER * 2, 2)  # ×2 = 开+平
+        # 手续费（开+平，Maker 0.02%）
+        sig["estimated_fee"] = round(actual_position * FEE_RATE_MAKER * 2, 2)
 
         # 仓位信息
-        sig["risk_amount"] = round(risk_amount, 2)
-        sig["risk_pct"] = round(_risk_pct * 100, 1)   # 显示为百分比（如 5.0 表示 5%）
-        sig["risk_contracts"] = risk_contracts
+        sig["position_pct"] = round(POSITION_PCT * 100, 1)
+        sig["risk_contracts"] = suggested
         sig["margin_contracts"] = margin_contracts
 
         # ---- 过滤 ----
         if rr_ratio < MIN_RISK_REWARD:
             continue
-        if suggested < MIN_CONTRACTS:
+        if final < MIN_CONTRACTS:
             continue
 
         filtered.append(sig)
@@ -632,6 +625,227 @@ def api_order():
                        f" @ {p}，止盈 {tp} / 止损 {sl} 已附带",
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# 自动交易引擎
+# ---------------------------------------------------------------------------
+import threading
+import time as _time
+
+_auto_trade_config = {
+    "enabled": False,
+    "ticker": "BTC-USDT-SWAP",
+    "interval": "5m",
+    "scan_window": 50,
+    "limit": 100,
+    "max_open_trades": 10,      # 最大同时持仓数
+    "cooldown_seconds": 300,    # 同方向信号冷却时间（5分钟）
+    "min_rr_ratio": 1.5,        # 最小盈亏比
+    "volume_filter": True,       # 量能确认（默认开）
+    "trend_filter": True,        # 趋势过滤（默认开）
+    "trend_period": 50,          # 均线周期（默认50）
+    "ma_type": "sma",            # 均线类型
+}
+_auto_trade_log: list[dict] = []     # 最近50条自动交易日志
+_auto_trade_positions: dict = {}     # 活跃仓位跟踪 {signal_key: {entry, sl, tp, side, size, time}}
+_auto_trade_lock = threading.Lock()
+_auto_trade_thread: threading.Thread | None = None
+
+
+def _auto_trade_scan_and_execute():
+    """自动交易核心：扫描信号 → 过滤 → 下单 → 跟踪。"""
+    while True:
+        try:
+            with _auto_trade_lock:
+                cfg = dict(_auto_trade_config)
+            if not cfg["enabled"]:
+                _time.sleep(10)
+                continue
+
+            ticker = cfg["ticker"]
+            client, _ = get_trade_client()
+            if client is None:
+                _time.sleep(30)
+                continue
+
+            # 检查当前持仓数
+            try:
+                positions = client.get_positions(ticker)
+                open_count = sum(1 for p in positions if float(p.get("pos", 0)) != 0)
+            except Exception:
+                open_count = 0
+
+            if open_count >= cfg["max_open_trades"]:
+                _auto_log(f"持仓数 {open_count} ≥ {cfg['max_open_trades']}，跳过")
+                _time.sleep(30)
+                continue
+
+            # 扫描信号
+            try:
+                balance = get_usdt_balance()
+                signals = detect_signals(
+                    ticker, cfg["interval"], cfg["limit"],
+                    scan_window=cfg["scan_window"],
+                    volume_enabled=cfg["volume_filter"],
+                    trend_period=cfg.get("trend_period", 0),
+                    ma_type=cfg.get("ma_type", "sma"),
+                )
+                signals = enrich_signals_with_risk(signals, balance)
+            except Exception as exc:
+                _auto_log(f"扫描失败: {exc}")
+                _time.sleep(30)
+                continue
+
+            # 筛选可下单信号 — 只交易最新一根K线的信号
+            now = _time.time()
+
+            # 找最新信号的时间戳（最新K线）
+            latest_ts = max((sig.get("timestamp", 0) for sig in signals), default=0)
+
+            for sig in signals:
+                # 只处理最新K线的信号（时间戳相同 = 同一根K线）
+                if sig.get("timestamp", 0) < latest_ts:
+                    continue
+                if sig.get("suggested_contracts", 0) < 1:
+                    continue
+                if sig.get("risk_reward_ratio", 0) < cfg["min_rr_ratio"]:
+                    continue
+
+                # 冷却检查：同方向+同价格附近不重复下单
+                sig_key = f"{sig['action']}_{sig['price']:.0f}"
+                if sig_key in _auto_trade_positions:
+                    continue
+
+                # 冷却时间检查
+                for pos_key, pos_info in _auto_trade_positions.items():
+                    if (pos_info["side"] == sig["action"]
+                            and now - pos_info["time"] < cfg["cooldown_seconds"]):
+                        break
+                else:
+                    # 没有冷却中的同方向仓位 → 下单
+                    _execute_auto_trade(sig, ticker, client)
+                    _time.sleep(2)  # 下单间隔
+
+            _time.sleep(30)  # 扫描间隔
+
+        except Exception as exc:
+            _auto_log(f"自动交易异常: {exc}")
+            _time.sleep(60)
+
+
+def _execute_auto_trade(sig: dict, ticker: str, client):
+    """执行单笔自动交易。"""
+    size = sig["suggested_contracts"]
+    entry = sig["price"]
+    sl = sig["sl"]
+    tp = sig["tp"]
+    side = sig["action"]
+
+    # ---- SL/TP 价格校验（OKX 要求）----
+    if side == "BUY":
+        if sl >= entry:
+            _auto_log(f"⚠️ {side} SL:{sl} ≥ 入场:{entry}，跳过", success=False)
+            return
+        if tp <= entry:
+            _auto_log(f"⚠️ {side} TP:{tp} ≤ 入场:{entry}，跳过", success=False)
+            return
+    else:  # SELL
+        if sl <= entry:
+            _auto_log(f"⚠️ {side} SL:{sl} ≤ 入场:{entry}，跳过", success=False)
+            return
+        if tp >= entry:
+            _auto_log(f"⚠️ {side} TP:{tp} ≥ 入场:{entry}，跳过", success=False)
+            return
+
+    cl_ord_id = "auto" + uuid.uuid4().hex[:22]
+    try:
+        order = client.place_limit_order(
+            inst_id=ticker,
+            side=ACTION_MAP[side],
+            sz=str(size),
+            px=str(entry),
+            take_profit=tp,
+            stop_loss=sl,
+            cl_ord_id=cl_ord_id,
+            pos_side="long" if side == "BUY" else "short",
+        )
+        # 记录
+        with _auto_trade_lock:
+            sig_key = f"{side}_{entry:.0f}"
+            _auto_trade_positions[sig_key] = {
+                "side": side,
+                "entry": entry,
+                "sl": sl,
+                "tp": tp,
+                "size": size,
+                "time": _time.time(),
+                "ord_id": order.get("ordId"),
+            }
+        _auto_log(
+            f"✅ {side} {size}张 @{entry} "
+            f"SL:{sl} TP:{tp} RR:{sig['risk_reward_ratio']}",
+            success=True,
+        )
+    except Exception as exc:
+        _auto_log(f"❌ {side} {size}张 @{entry} 失败: {exc}", success=False)
+
+
+def _auto_log(msg: str, success: bool | None = None):
+    """记录自动交易日志（最多50条）。"""
+    import datetime
+    ts = datetime.datetime.now().strftime("%H:%M:%S")
+    entry = {"time": ts, "msg": msg, "success": success}
+    with _auto_trade_lock:
+        _auto_trade_log.append(entry)
+        if len(_auto_trade_log) > 50:
+            _auto_trade_log.pop(0)
+
+
+def _start_auto_trade_thread():
+    """启动自动交易后台线程（只启动一次）。"""
+    global _auto_trade_thread
+    if _auto_trade_thread is None or not _auto_trade_thread.is_alive():
+        _auto_trade_thread = threading.Thread(
+            target=_auto_trade_scan_and_execute,
+            daemon=True,
+            name="auto-trade",
+        )
+        _auto_trade_thread.start()
+
+
+@app.route("/api/auto-trade", methods=["GET"])
+def api_auto_trade_get():
+    """获取自动交易状态和配置。"""
+    with _auto_trade_lock:
+        cfg = dict(_auto_trade_config)
+        log = list(_auto_trade_log)
+        positions = {k: {kk: vv for kk, vv in v.items()} for k, v in _auto_trade_positions.items()}
+    return jsonify({"config": cfg, "log": log[-20:], "positions": positions})
+
+
+@app.route("/api/auto-trade", methods=["POST"])
+def api_auto_trade_update():
+    """更新自动交易配置。"""
+    data = request.get_json(silent=True) or {}
+    with _auto_trade_lock:
+        for key in _auto_trade_config:
+            if key in data:
+                _auto_trade_config[key] = data[key]
+        cfg = dict(_auto_trade_config)
+
+    if cfg["enabled"]:
+        _start_auto_trade_thread()
+
+    return jsonify({"status": "ok", "config": cfg})
+
+
+@app.route("/api/auto-trade/stop", methods=["POST"])
+def api_auto_trade_stop():
+    """停止自动交易。"""
+    with _auto_trade_lock:
+        _auto_trade_config["enabled"] = False
+    return jsonify({"status": "ok", "message": "自动交易已停止"})
 
 
 if __name__ == "__main__":
