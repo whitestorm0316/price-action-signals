@@ -1,0 +1,272 @@
+{
+ "config": {
+  "enabled": false,
+  "ticker": "BTC-USDT-SWAP",
+  "interval": "15m",
+  "scan_window": 1000,
+  "limit": 1000,
+  "max_open_trades": 10,
+  "cooldown_seconds": 300,
+  "min_rr_ratio": 1.5,
+  "max_leverage": 10.0,
+  "volume_filter": true,
+  "trend_filter": true,
+  "trend_period": 50,
+  "ma_type": "sma"
+ },
+ "log": [
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）SELL bearish_pinbar @76537.6 SL:76745.9 TP:76121.0 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）SELL bearish_pinbar @76521.4 SL:76673.3 TP:76217.7 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_pinbar @76569.9 SL:76427.3 TP:76855.0 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）SELL bearish_engulfing @76494.5 SL:76782.8 TP:75918.0 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）SELL bearish_pinbar @76390.1 SL:76543.8 TP:76082.7 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）SELL bearish_pinbar @76521.7 SL:76733.3 TP:76098.5 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_engulfing @76566.0 SL:76411.7 TP:76874.7 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_pinbar @76726.4 SL:76529.3 TP:77120.6 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_engulfing @77410.0 SL:77102.7 TP:78024.6 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_engulfing @77565.2 SL:77323.5 TP:78048.6 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_engulfing @77572.0 SL:77299.1 TP:78117.8 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_pinbar @77786.6 SL:77609.3 TP:78141.1 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_pinbar @77771.0 SL:77624.0 TP:78064.9 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_engulfing @77919.8 SL:77547.1 TP:78665.2 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_engulfing @78173.0 SL:77890.2 TP:78738.6 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_pinbar @78159.9 SL:77989.2 TP:78501.4 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_engulfing @78247.7 SL:77989.1 TP:78764.9 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_engulfing @78254.2 SL:78081.7 TP:78599.1 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_engulfing @78029.6 SL:77902.1 TP:78284.7 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_pinbar @78054.3 SL:77874.0 TP:78415.0 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_engulfing @78078.2 SL:77859.4 TP:78515.9 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_pinbar @80757.5 SL:80379.4 TP:81513.7 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_engulfing @80943.2 SL:80460.4 TP:81908.7 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_pinbar @80748.9 SL:80471.1 TP:81304.4 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_pinbar @81214.8 SL:80936.0 TP:81772.5 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_engulfing @81139.1 SL:80820.4 TP:81776.6 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_pinbar @81209.3 SL:81032.2 TP:81563.4 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_pinbar @81117.9 SL:80978.5 TP:81396.7 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_engulfing @81269.7 SL:80943.7 TP:81921.7 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_engulfing @81192.7 SL:81019.1 TP:81539.8 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）SELL bearish_pinbar @81021.2 SL:81199.2 TP:80665.3 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）SELL bearish_engulfing @81008.8 SL:81210.4 TP:80605.7 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_pinbar @81282.6 SL:81130.3 TP:81587.1 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_engulfing @81290.6 SL:81118.7 TP:81634.4 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_engulfing @81248.5 SL:81086.9 TP:81571.7 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_engulfing @81876.3 SL:81444.1 TP:82740.8 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）BUY bullish_pinbar @81454.3 SL:81254.6 TP:81853.7 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）SELL bearish_engulfing @81299.1 SL:81512.1 TP:80873.1 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）SELL bearish_engulfing @81229.2 SL:81491.3 TP:80705.0 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）SELL bearish_engulfing @81135.0 SL:81355.7 TP:80693.7 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）SELL bearish_pinbar @81247.5 SL:81428.2 TP:80886.1 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）SELL bearish_engulfing @81247.5 SL:81428.2 TP:80886.1 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）SELL bearish_pinbar @81231.2 SL:81372.5 TP:80948.7 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）SELL bearish_engulfing @81259.0 SL:81381.3 TP:81014.5 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）SELL bearish_pinbar @81088.2 SL:81271.1 TP:80722.3 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）SELL bearish_engulfing @80955.2 SL:81230.9 TP:80403.9 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）SELL bearish_pinbar @80220.9 SL:80592.4 TP:79477.8 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）SELL bearish_engulfing @80303.3 SL:80467.7 TP:79974.5 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）SELL bearish_pinbar @80278.9 SL:80440.2 TP:79956.3 RR:2.0",
+   "success": null
+  },
+  {
+   "time": "17:50:45",
+   "msg": "📄 历史K线信号（不交易）SELL bearish_pinbar @80239.6 SL:80380.3 TP:79958.3 RR:2.0",
+   "success": null
+  }
+ ],
+ "positions": {},
+ "history": [],
+ "pending": {}
+}

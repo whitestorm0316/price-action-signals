@@ -11,9 +11,13 @@
 """
 from __future__ import annotations
 
+import datetime
 import json
+import math
 import os
 import sys
+import threading
+import time
 import uuid
 
 from flask import Flask, jsonify, render_template, request
@@ -39,7 +43,7 @@ app.config["TEMPLATES_AUTO_RELOAD"] = True
 ENV_FILE = os.path.join(_PROJECT_ROOT, ".env")
 
 # 允许从 .env 读取并可在前端设置的键
-CONFIG_KEYS = ("OKX_API_KEY", "OKX_API_SECRET", "OKX_PASSPHRASE", "OKX_PROXY")
+CONFIG_KEYS = ("OKX_API_KEY", "OKX_API_SECRET", "OKX_PASSPHRASE", "OKX_PROXY", "DASH_ACCOUNT_MODE")
 
 
 def _load_env_file() -> None:
@@ -106,11 +110,67 @@ SIGNAL_SCAN = int(os.getenv("DASH_SIGNAL_SCAN", "30"))
 TREND_PERIOD = int(os.getenv("DASH_TREND_PERIOD", "0"))   # 0 = 不启用趋势过滤
 MA_TYPE = os.getenv("DASH_MA_TYPE", "sma")
 
-# 允许的交易对（阶段一/二约束：先只 BTC-USDT-SWAP）
-ALLOWED_TICKERS = {"BTC-USDT-SWAP"}
+# 允许的交易对
+ALLOWED_TICKERS = {"BTC-USDT-SWAP", "ETH-USDT-SWAP"}
 
-# 合约面值（BTC-USDT-SWAP：1张 = 0.01 BTC）
-CONTRACT_BTC = 0.01
+# 合约面值（1张对应多少币）：优先动态拉取 OKX ctVal，失败用内置默认
+DEFAULT_FACE_VALUE = {"BTC-USDT-SWAP": 0.01, "ETH-USDT-SWAP": 0.1}
+_face_value_cache: dict = {}
+_face_cache_lock = threading.Lock()
+
+
+# 内置规格兜底（OKX 2025-01 规格）：ETH 面值0.1 ETH/张、最小0.01张、步长0.01张
+DEFAULT_INSTRUMENT = {
+    "BTC-USDT-SWAP": {"ctVal": 0.01, "lotSz": 0.01, "minSz": 0.01},
+    "ETH-USDT-SWAP": {"ctVal": 0.1, "lotSz": 0.01, "minSz": 0.01},
+}
+_meta_cache: dict = {}          # inst_id -> {meta, expires: ts}
+_META_TTL = 600                 # 10 分钟
+
+
+def get_instrument_meta(inst_id: str) -> dict:
+    """合约规格 {ctVal 面值, lotSz 步长, minSz 最小张数}。动态获取带缓存，失败回退内置默认。"""
+    dflt = DEFAULT_INSTRUMENT.get(inst_id) or {"ctVal": 0.01, "lotSz": 1, "minSz": 1}
+    with _face_cache_lock:
+        cached = _meta_cache.get(inst_id)
+        if cached and cached["expires"] > time.time():
+            return cached["meta"]
+    try:
+        import httpx
+        base = os.getenv("OKX_PUBLIC_BASE") or "https://www.okx.com"
+        r = httpx.get(f"{base}/api/v5/public/instruments",
+                      params={"instType": "SWAP", "instId": inst_id},
+                      timeout=8, proxy=os.getenv("OKX_PROXY"))
+        data = r.json().get("data") or []
+        if data:
+            i = data[0]
+            meta = {
+                "ctVal": float(i.get("ctVal") or 0) or dflt["ctVal"],
+                "lotSz": float(i.get("lotSz") or 0) or dflt["lotSz"],
+                "minSz": float(i.get("minSz") or 0) or dflt["minSz"],
+            }
+            with _face_cache_lock:
+                _meta_cache[inst_id] = {"meta": meta, "expires": time.time() + _META_TTL}
+            return meta
+    except Exception:  # noqa: BLE001
+        pass
+    return dflt
+
+
+def get_face_value(inst_id: str) -> float:
+    """兼容接口：合约面值（1张 = ctVal 个币）。"""
+    return get_instrument_meta(inst_id)["ctVal"]
+
+
+def fmt_sz(size: float, lot: float) -> str:
+    """按步长格式化下单张数（向下取整到 lotSz 的整数倍，OKX 精度要求）。"""
+    if lot >= 1:
+        return str(int(size + 1e-9))
+    decimals = max(0, len(str(lot).split('.')[-1]) if '.' in str(lot) else 0)
+    return f"{math.floor(size / lot + 1e-9) * lot:.{decimals}f}"
+
+
+CONTRACT_BTC = 0.01   # 兼容引用（默认面值）
 
 # 风险参数
 MIN_RISK_REWARD = 1.5       # 最小盈亏比阈值（低于此值不显示）
@@ -132,15 +192,20 @@ _trade_client: OKXTradingClient | None = None
 _trade_client_error: str | None = None
 
 
+def account_mode() -> str:
+    """当前账户模式：simulated(模拟盘,默认) / real(实盘)。"""
+    return "real" if (os.getenv("DASH_ACCOUNT_MODE", "simulated").strip().lower() == "real") else "simulated"
+
+
 def get_trade_client() -> tuple[OKXTradingClient | None, str | None]:
-    """惰性初始化 OKX 模拟盘客户端（走 OKX_PROXY 代理）；未配凭证返回 (None, 错误说明)。"""
+    """按账户模式初始化 OKX 交易客户端（走代理）；未配凭证返回 (None, 错误说明)。"""
     global _trade_client, _trade_client_error
     if not _ORDER_SIMULATED:
         return None, None
     if _trade_client is None and _trade_client_error is None:
         try:
             _trade_client = OKXTradingClient(
-                simulated=True,
+                simulated=(account_mode() == "simulated"),
                 proxy=os.getenv("OKX_PROXY") or None,
             )
         except OKXConfigError as exc:
@@ -179,74 +244,91 @@ def enrich_signals_with_risk(
     signals: list[dict],
     balance: float,
     risk_pct: float | None = None,
+    max_leverage: float | None = None,
+    min_ratio: float | None = None,
+    max_open_trades: int | None = None,
+    face_value: float | None = None,
+    lot: float = 1,
+    min_sz: float = 1,
 ) -> list[dict]:
-    """仓位管理：总权益×10%下注，止损止盈用价格行为学原始SL/TP。
+    """仓位管理：固定风险比例模型（Fixed Fractional Risk）。
 
-    计算公式：
-        position_value = balance × 10%（总权益的10%）
-        suggested_contracts = position_value / (CONTRACT_BTC × entry)
-        保证金上限 = available × 0.80 → margin_contracts
-        final_contracts = min(suggested_contracts, margin_contracts)
+    每笔交易的风险金额固定为 账户余额 × risk_pct：
+        risk_amount    = balance × risk_pct          （本笔最大亏损）
+        stop_distance  = |entry - stop_loss|
+        stop_pct       = stop_distance / entry
+        notional       = risk_amount / stop_pct      （触及止损恰好亏 risk_amount）
+        size           = notional / (entry × face_value)，向下取整到张数精度
+        size < 最小张数 或 盈亏比 < min_ratio → 丢弃信号
 
-        SL/TP 用信号原始价格（Pinbar/Engulfing 的 pattern.stop / pattern.take_profit）
-        expected_loss = final × |entry - sl| × CONTRACT_BTC
-        expected_profit = final × |tp - entry| × CONTRACT_BTC
+    边界：
+        - balance ≤ 0 → 不生成任何信号
+        - stop_distance = 0 → 丢弃（防除零）
+        - notional 上限 = balance × max_leverage ÷ max_open_trades：
+          把"余额×杠杆"的总风险预算平分给最大持仓数（默认10笔），
+          保证配额内的信号可以**同时**开出 max_open_trades 笔，
+          不会下 1~2 笔就把可用保证金吃光。
     """
-    POSITION_PCT = 0.10       # 每笔仓位 = 总权益 × 10%
-    safe_balance = balance * 0.80  # 保证金上限留20%余量
-    filtered = []
+    face_value = face_value or CONTRACT_BTC
+    contracts_step = lot           # OKX lotSz 步长（BTC=1张, ETH=0.01张）
+    min_contracts = min_sz         # OKX minSz 最小张数
+    rp = risk_pct if risk_pct is not None and risk_pct > 0 else 0.01
+    lev = max_leverage if max_leverage is not None else 3.0
+    ratio_min = min_ratio if min_ratio is not None else MIN_RISK_REWARD
+    trades_cap = max_open_trades if max_open_trades and max_open_trades > 0 else 10
+    per_trade_budget = balance * lev / trades_cap   # 每笔名义仓位上限
 
+    filtered = []
     for sig in signals:
+        if balance <= 0:
+            break
         entry = sig.get("price", 0)
         sl = sig.get("sl", 0)
         tp = sig.get("tp", 0)
-
         if not all([entry, sl, tp, entry > 0]):
             continue
 
-        # 用信号本身的盈亏比过滤（不过滤则显示太多低质量信号）
-        risk_distance = abs(entry - sl)
+        stop_distance = abs(entry - sl)
+        if stop_distance == 0:          # 防除零：入场=止损
+            continue
+        stop_pct = stop_distance / entry
+
         reward_distance = abs(tp - entry)
-        rr_ratio = round(reward_distance / risk_distance, 2) if risk_distance > 0 else 0
+        rr_ratio = round(reward_distance / stop_distance, 2)
         sig["risk_reward_ratio"] = rr_ratio
 
-        # ---- 仓位计算 ----
-        position_value = balance * POSITION_PCT  # 总权益的10%
-        notional_per = CONTRACT_BTC * entry
-
-        # 建议张数（基于总权益10%仓位）
-        suggested = int(position_value / notional_per) if notional_per > 0 else 0
-        suggested = max(suggested, 0)
-
-        # 保证金上限（可用余额×80%）
-        margin_contracts = int(safe_balance / notional_per) if notional_per > 0 else 0
-        margin_contracts = max(margin_contracts, 0)
-
-        # 最终张数：取两者最小值
-        final = min(suggested, margin_contracts)
-        sig["suggested_contracts"] = final
-
-        # 实际仓位价值
-        actual_position = final * notional_per
-        sig["suggested_value"] = round(actual_position, 2)
-
-        # ---- 预计盈亏（用信号原始SL/TP，价格行为学）----
-        sig["expected_profit"] = round(final * reward_distance * CONTRACT_BTC, 2)
-        sig["expected_loss"] = round(final * risk_distance * CONTRACT_BTC, 2)
-
-        # 手续费（开+平，Maker 0.02%）
-        sig["estimated_fee"] = round(actual_position * FEE_RATE_MAKER * 2, 2)
-
-        # 仓位信息
-        sig["position_pct"] = round(POSITION_PCT * 100, 1)
-        sig["risk_contracts"] = suggested
-        sig["margin_contracts"] = margin_contracts
-
-        # ---- 过滤 ----
-        if rr_ratio < MIN_RISK_REWARD:
+        # 盈亏比过滤
+        if rr_ratio < ratio_min:
             continue
-        if final < MIN_CONTRACTS:
+
+        # 最大名义仓位上限：总预算平分给每个并发持仓
+        max_notional = per_trade_budget
+
+        # 名义仓位 = 风险金额 / 止损百分比；超出上限则截断
+        risk_amount = balance * rp
+        notional = risk_amount / stop_pct
+
+        if notional > max_notional:
+            notional = max_notional
+
+        size = notional / (entry * face_value)
+        # 按步长 lotSz 向下取整（不假设整数张：BTC=1张、ETH=0.01张）
+        size = math.floor(size / contracts_step) * contracts_step
+        size = round(size, 8)
+
+        # 最小张数过滤
+        if size < min_contracts:
             continue
+
+        sig["suggested_contracts"] = size
+        sig["risk_amount"] = round(size * stop_distance * face_value, 2)  # 本笔实际最大亏损
+        sig["risk_amount_plan"] = round(risk_amount, 2)                   # 计划风险金额
+        sig["notional"] = round(size * entry * face_value, 2)             # 实际名义仓位
+        sig["stop_pct"] = round(stop_pct, 6)
+        sig["expected_profit"] = round(size * reward_distance * face_value, 2)
+        sig["expected_loss"] = sig["risk_amount"]
+        sig["estimated_fee"] = round(size * entry * face_value * FEE_RATE_MAKER * 2, 2)
+        sig["position_pct"] = round(rp * 100, 2)
 
         filtered.append(sig)
 
@@ -258,11 +340,7 @@ def enrich_signals_with_risk(
 # ---------------------------------------------------------------------------
 def fetch_klines(ticker: str, interval: str, limit: int) -> list:
     """拉取 K 线（升序），返回 lightweight-charts 格式 [{time,open,high,low,close}]。"""
-    client = OKXClient(proxy=OKX_PROXY)
-    try:
-        candles = client.get_candles(ticker, bar=interval, limit=limit)
-    finally:
-        client.close()
+    candles = _fetch_candles_cached(ticker, interval, limit)
     # time 需秒级 Unix 时间戳
     return [
         {
@@ -275,6 +353,41 @@ def fetch_klines(ticker: str, interval: str, limit: int) -> list:
         }
         for c in candles
     ]
+
+
+# ---- K线增量缓存：缓存命中时只从 OKX 拉最新 3 根做合并 ----
+_kline_cache: dict = {}                      # (ticker, interval) -> {"candles": [...], "ts": float}
+_kline_cache_lock = threading.Lock()
+KLINE_CACHE_TTL = 120                        # 秒；超过则全量重拉
+
+
+def _fetch_candles_cached(ticker: str, interval: str, limit: int) -> list:
+    """增量拉取 Candle：缓存存在且未过期时只拉最新 3 根，与缓存合并。"""
+    key = (ticker, interval)
+    with _kline_cache_lock:
+        cached = _kline_cache.get(key)
+    stale = cached is None or (time.time() - cached["ts"]) > KLINE_CACHE_TTL
+
+    client = OKXClient(proxy=OKX_PROXY)
+    try:
+        if cached is None or stale or len(cached["candles"]) < limit:
+            # 首次 / 缓存过期 / 缓存长度不够 → 全量
+            candles = client.get_candles(ticker, bar=interval, limit=limit)
+        else:
+            # 增量：只拉最新 3 根，更新缓存里对应时间戳的 K 线（bar 内实时更新）
+            fresh = client.get_candles(ticker, bar=interval, limit=3)
+            fresh_ts = {c.ts: c for c in fresh}
+            merged = [fresh_ts.get(c.ts, c) for c in cached["candles"]]
+            last_ts = cached["candles"][-1].ts
+            new_bars = [c for c in fresh if c.ts > last_ts]   # 新收线追加
+            if new_bars:
+                merged.extend(new_bars)
+            candles = merged
+        with _kline_cache_lock:
+            _kline_cache[key] = {"candles": candles[-3000:], "ts": time.time()}
+    finally:
+        client.close()
+    return candles if len(candles) <= limit else candles[-limit:]
 
 
 # ---------------------------------------------------------------------------
@@ -303,11 +416,7 @@ def detect_signals(
     mt_ = ma_type or MA_TYPE
     sw_ = scan_window if scan_window is not None else SIGNAL_SCAN
 
-    client = OKXClient(proxy=OKX_PROXY)
-    try:
-        candles = client.get_candles(ticker, bar=interval, limit=limit)
-    finally:
-        client.close()
+    candles = _fetch_candles_cached(ticker, interval, limit)
 
     signals: list[dict] = []
     scan = min(sw_, len(candles) - 1)
@@ -443,10 +552,27 @@ def api_signals():
     # 时间倒序（最新的在前），便于前端表格展示
     signals.reverse()
 
+    # 标记进行中K线的信号（formings：形态会重绘，收盘前可能消失）
+    _bar_s = BAR_SECONDS.get(interval, 300)   # timestamp 已是秒级
+    _now_s = time.time()
+    for s in signals:
+        s["forming"] = bool(s.get("timestamp", 0) + _bar_s > _now_s)
+
     # 仓位计算：余额×risk_pct%风险 / 止损距离 → 建议张数；过滤盈亏比<1.5 & 建议金额不足
     balance = get_usdt_balance()
     risk_pct = request.args.get("risk_pct", type=float)
-    signals = enrich_signals_with_risk(signals, balance, risk_pct=risk_pct)
+    max_lev = request.args.get("max_lev", type=float)
+    max_trades = request.args.get("max_trades", type=int)
+    meta = get_instrument_meta(ticker)
+    signals = enrich_signals_with_risk(
+        signals, balance, risk_pct=risk_pct,
+        max_leverage=max_lev, max_open_trades=max_trades,
+        face_value=meta["ctVal"], lot=meta["lotSz"], min_sz=meta["minSz"])
+    for s in signals:
+        s["face_value"] = meta["ctVal"]     # 1张 = ctVal 币
+        s["lot_sz"] = meta["lotSz"]         # 张数步长
+        s["min_sz"] = meta["minSz"]         # 最小张数
+        s["ticker"] = ticker
 
     return jsonify(signals)
 
@@ -467,6 +593,7 @@ def api_config_get():
         {
             "configured": all(os.getenv(k) for k in ("OKX_API_KEY", "OKX_API_SECRET", "OKX_PASSPHRASE")),
             "proxy": os.getenv("OKX_PROXY") or "",
+            "account_mode": account_mode(),
             "simulated": _ORDER_SIMULATED,
             "api_key_masked": _mask_secret(os.getenv("OKX_API_KEY") or ""),
             "secret_masked": _mask_secret(os.getenv("OKX_API_SECRET") or ""),
@@ -482,12 +609,14 @@ def api_config_save():
     前端传值覆盖对应键；未传的键保留原值。
     """
     data = request.get_json(silent=True) or {}
-    keys = ("OKX_API_KEY", "OKX_API_SECRET", "OKX_PASSPHRASE", "OKX_PROXY")
-    # 只更新传入的键；空字符串视为清除
+    keys = ("OKX_API_KEY", "OKX_API_SECRET", "OKX_PASSPHRASE", "OKX_PROXY", "DASH_ACCOUNT_MODE")
+    # 只更新传入的键；空字符串视为清除（账户模式除外）
     updates = {}
     for k in keys:
         if k in data:
             updates[k] = data[k].strip()
+    if "DASH_ACCOUNT_MODE" in updates and updates["DASH_ACCOUNT_MODE"] not in ("simulated", "real"):
+        return jsonify({"error": "DASH_ACCOUNT_MODE 只能是 simulated 或 real"}), 400
     if not updates:
         return jsonify({"error": "没有可更新的配置项"}), 400
 
@@ -573,6 +702,16 @@ def api_order():
 
     # 价格关系校验（BUY: sl < price < tp；SELL 对称），与 webhook 服务一致
     p, s, t = float(price), float(sl), float(tp)
+
+    # 杠杆倍数（可选）：限价单数量不变，开仓前设置该交易对保证金倍数
+    lever = data.get("lever")
+    lever_str = ""
+    if lever is not None:
+        try:
+            lever_f = min(20.0, max(1.0, float(lever)))
+            lever_str = str(int(lever_f)) if lever_f == int(lever_f) else f"{lever_f:g}"
+        except (TypeError, ValueError):
+            lever_str = ""
     if action == "BUY" and not (s < p < t):
         return jsonify({"error": "BUY 要求 sl < price < tp"}), 400
     if action == "SELL" and not (t < p < s):
@@ -589,12 +728,30 @@ def api_order():
                 "order_id": f"mock-{uuid.uuid4().hex[:16]}",
                 "action": action,
                 "ticker": ticker,
-                "price": price, "sl": sl, "tp": tp, "size": size,
+                "price": price, "sl": sl, "tp": tp, "size": size, "lever": lever,
                 "message": f"[mock] 未接真实模拟盘，已模拟提交 {action} {size} 张 {ticker}",
             }
         )
 
     cl_ord_id = "dash" + uuid.uuid4().hex[:24]   # OKX clOrdId 仅允许字母数字，不能用连字符
+    pos_side_ = "long" if action == "BUY" else "short"
+    # 按弹窗选择的倍数设置该交易对杠杆（先设杠杆再下单；空头/多头分别设置）
+    if lever_str:
+        try:
+            client.set_leverage(inst_id=ticker, lever=lever_str, pos_side=pos_side_)
+        except OKXTradeError as lev_exc:
+            # 对冲模式下 posSide 可能不被接受（净模式账户），去掉 posSide 再试一次
+            try:
+                client.set_leverage(inst_id=ticker, lever=lever_str)
+            except OKXTradeError as lev_exc2:
+                return jsonify({
+                    "error": f"设置杠杆失败: {lev_exc2}（账户模式或倍数不被支持）",
+                    "mock": False,
+                }), 502
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception:  # noqa: BLE001
+            pass   # 杠杆已设置过/等于当前值时 OKX 可能报错，不阻断下单
     try:
         order = client.place_limit_order(
             inst_id=ticker,
@@ -605,7 +762,7 @@ def api_order():
             stop_loss=s,
             cl_ord_id=cl_ord_id,
             # U本位永续合约(BTC-USDT-SWAP)下单必须指定持仓方向
-            pos_side="long" if action == "BUY" else "short",
+            pos_side=pos_side_,
         )
     except OKXTradeError as exc:
         return jsonify({"error": f"OKX 下单失败: {exc}", "mock": False}), 502
@@ -621,17 +778,15 @@ def api_order():
             "action": action,
             "ticker": ticker,
             "price": price, "sl": sl, "tp": tp, "size": size,
-            "message": f"[模拟盘] 已提交 {action} 限价单 {size} 张 {ticker}"
-                       f" @ {p}，止盈 {tp} / 止损 {sl} 已附带",
+            "message": f"[{'实盘🔴' if account_mode() == 'real' else '模拟盘🟢'}] 已提交 {action} 限价单 {size} 张 {ticker}"
+                       f" @ {p}，杠杆 {lever_str or '默认'}x，止盈 {tp} / 止损 {sl} 已附带",
+            "account_mode": account_mode(),
         }
     )
 
 
 # ---------------------------------------------------------------------------
 # 自动交易引擎
-# ---------------------------------------------------------------------------
-import threading
-import time as _time
 
 _auto_trade_config = {
     "enabled": False,
@@ -642,15 +797,90 @@ _auto_trade_config = {
     "max_open_trades": 10,      # 最大同时持仓数
     "cooldown_seconds": 300,    # 同方向信号冷却时间（5分钟）
     "min_rr_ratio": 1.5,        # 最小盈亏比
+    "max_leverage": 3.0,        # 最大杠杆倍数（决定每笔仓位预算上限）
     "volume_filter": True,       # 量能确认（默认开）
     "trend_filter": True,        # 趋势过滤（默认开）
     "trend_period": 50,          # 均线周期（默认50）
     "ma_type": "sma",            # 均线类型
 }
-_auto_trade_log: list[dict] = []     # 最近50条自动交易日志
+_auto_trade_log: list[dict] = []     # 最近200条自动交易日志
 _auto_trade_positions: dict = {}     # 活跃仓位跟踪 {signal_key: {entry, sl, tp, side, size, time}}
+_auto_trade_history: list[dict] = [] # 已成交订单历史（持久化）
+_auto_pending_orders: dict = {}      # 挂单跟踪 {ord_id: {..., sig_ts: N根K线开盘ts}}
+_auto_failed_sigs: dict = {}         # 本根K线内下单失败的信号 {sig_key: sig_ts_ms} —— 同根不再重试
+
+BAR_SECONDS = {
+    "1m": 60, "3m": 180, "5m": 300, "15m": 900,
+    "30m": 1800, "1H": 3600, "2H": 7200, "4H": 14400, "1D": 86400,
+}
+
+
+def _bar_seconds(interval: str) -> int:
+    """K线周期 → 秒。未知周期默认 300（5分钟）。"""
+    return BAR_SECONDS.get(interval, 300)
 _auto_trade_lock = threading.Lock()
 _auto_trade_thread: threading.Thread | None = None
+
+# ---- 自动交易状态持久化（重启不丢）----
+_AUTO_TRADE_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auto_trade_state.json")
+
+
+def _load_auto_trade_state() -> None:
+    """启动时从磁盘恢复日志 / 持仓跟踪 / 成交历史。"""
+    global _auto_trade_log, _auto_trade_positions, _auto_trade_history
+    global _auto_trade_config
+    try:
+        with open(_AUTO_TRADE_STATE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return
+    except Exception as exc:  # noqa: BLE001
+        print(f"[auto-trade] 状态文件损坏，忽略: {exc}")
+        return
+    # 配置恢复（enabled 不恢复——重启后不自动交易，需手动开始）
+    saved_cfg = data.get("config", {})
+    if isinstance(saved_cfg, dict):
+        for k in ("ticker", "interval", "limit", "scan_window", "max_open_trades",
+                  "cooldown_seconds", "min_rr_ratio", "max_leverage", "volume_filter",
+                  "trend_filter", "trend_period", "ma_type"):
+            if k in saved_cfg:
+                _auto_trade_config[k] = saved_cfg[k]
+    _auto_trade_config["enabled"] = False
+    _auto_trade_log = data.get("log", [])[-50:]
+    _auto_trade_history = data.get("history", [])[-500:]
+    _auto_trade_positions = data.get("positions", {})
+    _auto_pending_orders.update(data.get("pending", {}))
+    # 清理过期的持仓跟踪（超过冷却时间2倍的）
+    now = time.time()
+    cooldown = _auto_trade_config["cooldown_seconds"] * 2
+    _auto_trade_positions = {
+        k: v for k, v in _auto_trade_positions.items()
+        if isinstance(v, dict) and now - v.get("time", 0) < cooldown
+    }
+    print(f"[auto-trade] 已恢复状态：历史{len(_auto_trade_history)}条 "
+          f"持仓跟踪{len(_auto_trade_positions)}条")
+
+
+def _save_auto_trade_state() -> None:
+    """原子写入状态文件（tmp + rename）。"""
+    with _auto_trade_lock:
+        snapshot = {
+            "config": dict(_auto_trade_config),
+            "log": _auto_trade_log[-200:],
+            "positions": {k: dict(v) for k, v in _auto_trade_positions.items()},
+            "history": _auto_trade_history[-200:],
+            "pending": {k: dict(v) for k, v in _auto_pending_orders.items()},
+        }
+    tmp = _AUTO_TRADE_STATE_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, _AUTO_TRADE_STATE_FILE)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[auto-trade] 状态保存失败: {exc}")
+
+
+_load_auto_trade_state()
 
 
 def _auto_trade_scan_and_execute():
@@ -660,14 +890,20 @@ def _auto_trade_scan_and_execute():
             with _auto_trade_lock:
                 cfg = dict(_auto_trade_config)
             if not cfg["enabled"]:
-                _time.sleep(10)
+                time.sleep(10)
                 continue
 
             ticker = cfg["ticker"]
             client, _ = get_trade_client()
             if client is None:
-                _time.sleep(30)
+                time.sleep(30)
                 continue
+
+            # 挂单有效期检查（1根K线）：未成交到点撤销
+            try:
+                _auto_check_pending_orders(client, cfg["interval"])
+            except Exception as exc:
+                _auto_log(f"挂单检查异常: {exc}", success=False)
 
             # 检查当前持仓数
             try:
@@ -678,9 +914,14 @@ def _auto_trade_scan_and_execute():
 
             if open_count >= cfg["max_open_trades"]:
                 _auto_log(f"持仓数 {open_count} ≥ {cfg['max_open_trades']}，跳过")
-                _time.sleep(30)
+                time.sleep(30)
                 continue
 
+            # 扫描参数（与表盘同源：ticker/周期/窗口/量能/趋势/倍数）
+            _meta = get_instrument_meta(ticker)   # 币种规格：面值/步长/最小张数
+            scan_cfg_msg = (f"{ticker} {cfg['interval']} K线{cfg['limit']} "
+                            f"窗口{cfg['scan_window']} 量能{'开' if cfg['volume_filter'] else '关'} "
+                            f"趋势{cfg.get('trend_period', 0) or '关'} 倍数{cfg.get('max_leverage', 3.0)}")
             # 扫描信号
             try:
                 balance = get_usdt_balance()
@@ -691,47 +932,96 @@ def _auto_trade_scan_and_execute():
                     trend_period=cfg.get("trend_period", 0),
                     ma_type=cfg.get("ma_type", "sma"),
                 )
-                signals = enrich_signals_with_risk(signals, balance)
+                _meta = get_instrument_meta(ticker)
+                signals = enrich_signals_with_risk(
+                    signals, balance, max_leverage=cfg.get("max_leverage", 3.0),
+                    max_open_trades=cfg["max_open_trades"],
+                    face_value=_meta["ctVal"], lot=_meta["lotSz"], min_sz=_meta["minSz"])
             except Exception as exc:
                 _auto_log(f"扫描失败: {exc}")
-                _time.sleep(30)
+                time.sleep(30)
                 continue
 
-            # 筛选可下单信号 — 只交易最新一根K线的信号
-            now = _time.time()
+            # 筛选可下单信号 — 只交易"最新一根【已收盘】K线"的信号
+            # （进行中的K线形态会随价格变动/重绘，收盘后可能消失，不用于交易）
+            now = time.time()
+            bar = _bar_seconds(cfg["interval"])          # K线周期(秒)；timestamp 同为秒
+            # 最新已收盘 K 线时间戳 = 最新一根"开盘ts+周期<=now"的K线
+            closed_sigs = [s for s in signals if s.get("timestamp", 0) + bar <= now]
+            forming_sigs = [s for s in signals
+                            if s.get("timestamp", 0) + bar > now]
 
-            # 找最新信号的时间戳（最新K线）
-            latest_ts = max((sig.get("timestamp", 0) for sig in signals), default=0)
+            # 进行中K线的信号：只打印，不交易（等收盘确认）
+            for sig in forming_sigs:
+                desc = (f"{sig['action']} {sig['strategy']} @{sig['price']:.1f} "
+                        f"SL:{sig['sl']:.1f} TP:{sig['tp']:.1f} RR:{sig['risk_reward_ratio']}")
+                _auto_log(f"🚧 进行中K线信号（未收盘，等收盘确认）{desc}")
 
-            for sig in signals:
-                # 只处理最新K线的信号（时间戳相同 = 同一根K线）
-                if sig.get("timestamp", 0) < latest_ts:
+            # 找最新【已收盘】K线的信号
+            # 注意：以"日历上的最新收盘K线"为基准（floor(now/bar) 的前一根），
+            # 而不是"有信号的最新K线"——否则当新收盘的K线没有信号时，
+            # 一根旧K线的信号会被反复当成最新信号重试下单（如15:45的信号在17点仍被交易）
+            bar_s = int(bar)   # bar 本身为秒
+            latest_ts = (int(now) // bar_s) * bar_s - bar_s
+            latest_count = sum(1 for sig in closed_sigs if sig.get("timestamp", 0) == latest_ts)
+
+            # —— 本轮扫描摘要（检测到K线信号必打印）——
+            if not signals:
+                _auto_log(f"🔍 扫描 {scan_cfg_msg} → 本轮无信号")
+            else:
+                extra = f"，另进行中{len(forming_sigs)}个(不交易)" if forming_sigs else ""
+                _auto_log(f"🔍 扫描 {scan_cfg_msg} → 已收盘信号{len(closed_sigs)}个，"
+                          f"最新收盘K线{latest_count}个{extra}")
+
+            at_least_one = False
+            for sig in closed_sigs:
+                ts = sig.get("timestamp", 0)
+                desc = (f"{sig['action']} {sig['strategy']} @{sig['price']:.1f} "
+                        f"SL:{sig['sl']:.1f} TP:{sig['tp']:.1f} RR:{sig['risk_reward_ratio']}")
+                # 非最新K线的信号（历史参考），简要打印
+                if ts < latest_ts:
+                    _auto_log(f"📄 历史K线信号（不交易）{desc}")
                     continue
-                if sig.get("suggested_contracts", 0) < 1:
+                # —— 以下为最新K线信号，逐个打印判定 ——
+                if sig.get("suggested_contracts", 0) < _meta["minSz"]:
+                    _auto_log(f"⏭️ 最新K线信号 {desc}｜张数不足(<{min_sz_auto}) 不下单")
                     continue
                 if sig.get("risk_reward_ratio", 0) < cfg["min_rr_ratio"]:
+                    _auto_log(f"⏭️ 最新K线信号 {desc}｜盈亏比<{cfg['min_rr_ratio']}，跳过")
                     continue
 
                 # 冷却检查：同方向+同价格附近不重复下单
                 sig_key = f"{sig['action']}_{sig['price']:.0f}"
+                # 本根K线内已重试失败过的信号不重复下单（下一根K线重新算新信号）
+                if _auto_failed_sigs.get(sig_key) == ts:
+                    _auto_log(f"⏭️ 最新K线信号 {desc}｜本根K线重试失败过，本根内不再重试")
+                    continue
                 if sig_key in _auto_trade_positions:
+                    _auto_log(f"⏭️ 最新K线信号 {desc}｜重复信号已持仓跟踪，跳过")
                     continue
 
                 # 冷却时间检查
                 for pos_key, pos_info in _auto_trade_positions.items():
                     if (pos_info["side"] == sig["action"]
                             and now - pos_info["time"] < cfg["cooldown_seconds"]):
+                        _auto_log(f"⏭️ 最新K线信号 {desc}｜{sig['action']}方向冷却中"
+                                  f"({int(cfg['cooldown_seconds'] - (now - pos_info['time']))}s)，跳过")
                         break
                 else:
                     # 没有冷却中的同方向仓位 → 下单
-                    _execute_auto_trade(sig, ticker, client)
-                    _time.sleep(2)  # 下单间隔
+                    at_least_one = True
+                    ok = _execute_auto_trade(sig, ticker, client)
+                    if not ok:
+                        _auto_failed_sigs[sig_key] = ts   # 本根K线内不再重试该信号
+                        if len(_auto_failed_sigs) > 200:
+                            _auto_failed_sigs.clear()
+                    time.sleep(2)  # 下单间隔
 
-            _time.sleep(30)  # 扫描间隔
+            time.sleep(30)  # 扫描间隔
 
         except Exception as exc:
             _auto_log(f"自动交易异常: {exc}")
-            _time.sleep(60)
+            time.sleep(60)
 
 
 def _execute_auto_trade(sig: dict, ticker: str, client):
@@ -759,17 +1049,42 @@ def _execute_auto_trade(sig: dict, ticker: str, client):
             return
 
     cl_ord_id = "auto" + uuid.uuid4().hex[:22]
+    sig_ts = sig.get("timestamp")  # 信号K线(N)开盘时间戳（毫秒）
+    # 信号所在K线定位（成功/失败/重试日志统一带）：开盘本地时间 + 周期级别
+    bar_s = _bar_seconds(cfg_interval := _auto_trade_config.get("interval", "5m"))
+    sig_bar = ""
+    if sig_ts:
+        bar_dt = datetime.datetime.fromtimestamp(sig_ts).strftime("%m-%d %H:%M")
+        sig_bar = f"｜信号K线: {bar_dt} ({bar_s // 60}分钟级)"
     try:
-        order = client.place_limit_order(
-            inst_id=ticker,
-            side=ACTION_MAP[side],
-            sz=str(size),
-            px=str(entry),
-            take_profit=tp,
-            stop_loss=sl,
-            cl_ord_id=cl_ord_id,
-            pos_side="long" if side == "BUY" else "short",
-        )
+        # OKX 偶发 50001/503 服务临时不可用 → 自动重试（最多3次，间隔2s/4s/8s）
+        order = None
+        for attempt in range(3):
+            try:
+                order = client.place_limit_order(
+                    inst_id=ticker,
+                    side=ACTION_MAP[side],
+                    sz=fmt_sz(size, _meta["lotSz"]),
+                    px=str(entry),
+                    take_profit=tp,
+                    stop_loss=sl,
+                    cl_ord_id=cl_ord_id,
+                    pos_side="long" if side == "BUY" else "short",
+                )
+                break
+            except Exception as exc:
+                retryable = ("50001" in str(exc) or "503" in str(exc)
+                             or "temporarily unavailable" in str(exc).lower())
+                if retryable and attempt < 2:
+                    wait_s = 2 * (2 ** attempt)
+                    _auto_log(f"⚠️ OKX服务临时不可用(50001)，{wait_s}s后重试 "
+                              f"({attempt + 1}/3) {side} {size}张 @{entry}{sig_bar}", success=None)
+
+                    time.sleep(wait_s)
+                    continue
+                raise
+        if order is None:
+            raise RuntimeError("下单重试耗尽")
         # 记录
         with _auto_trade_lock:
             sig_key = f"{side}_{entry:.0f}"
@@ -779,27 +1094,123 @@ def _execute_auto_trade(sig: dict, ticker: str, client):
                 "sl": sl,
                 "tp": tp,
                 "size": size,
-                "time": _time.time(),
+                "time": time.time(),
                 "ord_id": order.get("ordId"),
             }
+            ord_id = order.get("ordId")
+            _auto_trade_history.append({
+                "time": datetime.datetime.now().strftime("%m-%d %H:%M:%S"),
+                "ts": time.time(),
+                "side": side,
+                "entry": entry,
+                "sl": sl,
+                "tp": tp,
+                "size": size,
+                "rr": sig.get("risk_reward_ratio"),
+                "risk_amount": sig.get("risk_amount"),
+                "ord_id": ord_id,
+                "ticker": ticker,
+                "status": "pending",   # pending → filled / expired
+                "sig_ts": sig_ts,
+            })
+            if len(_auto_trade_history) > 500:
+                _auto_trade_history.pop(0)
+            # 挂单跟踪：有效期 = 1根K线（第 N+1 根收盘时未成交即撤销）
+            if ord_id:
+                _auto_pending_orders[str(ord_id)] = {
+                    "ticker": ticker,
+                    "side": side,
+                    "entry": entry,
+                    "sl": sl,
+                    "tp": tp,
+                    "size": size,
+                    "sig_ts": sig_ts * 1000,   # 毫秒（sig_ts 为秒）
+                    "placed_at": time.time(),
+                    "cl_ord_id": cl_ord_id,
+                    "sig_key": sig_key,
+                }
+        _save_auto_trade_state()
         _auto_log(
             f"✅ {side} {size}张 @{entry} "
-            f"SL:{sl} TP:{tp} RR:{sig['risk_reward_ratio']}",
+            f"SL:{sl} TP:{tp} RR:{sig['risk_reward_ratio']}{sig_bar}",
             success=True,
         )
+        return True
     except Exception as exc:
-        _auto_log(f"❌ {side} {size}张 @{entry} 失败: {exc}", success=False)
+        _auto_log(f"❌ {side} {size}张 @{entry} 失败{sig_bar}: {exc}", success=False)
+        return False
+
+
+def _auto_check_pending_orders(client, interval: str):
+    """挂单有效期检查 = 1 根 K 线。
+
+    流程：
+      1. 信号在第 N 根 K 线收盘后生成 → 挂单（记录 sig_ts=N 根开盘时间戳）；
+      2. 第 N+1 根 K 线收盘时（now >= sig_ts + 2×bar）检查订单状态：
+         - 已成交 → 进入正常持仓（交易所侧自带止盈止损）；从跟踪中移除；
+         - 未成交 → 调用 OKX 撤单接口撤销；信号作废，不再补挂。
+    """
+    bar = _bar_seconds(interval) * 1000  # 毫秒
+    now_ms = time.time() * 1000
+    with _auto_trade_lock:
+        entries = {oid: dict(po) for oid, po in _auto_pending_orders.items()}
+    for oid, po in entries.items():
+        sig_ts = po.get("sig_ts") or 0
+        if sig_ts and sig_ts < 1e11:            # 兼容旧的秒级数据 → 转毫秒
+            sig_ts *= 1000
+        expiry_ms = (sig_ts + 2 * bar) if sig_ts else (po.get("placed_at", 0) + 2 * bar / 1000) * 1000
+        if now_ms < expiry:
+            continue  # 还在第 N+1 根K线内，继续等待
+        # 到期：查订单状态
+        state = None
+        try:
+            od = client.get_order(po["ticker"], ord_id=oid)
+            state = od.get("state")
+        except Exception as exc:
+            # 查不到该订单（已归档/已撤销）→ 视为已处理
+            with _auto_trade_lock:
+                _auto_pending_orders.pop(oid, None)
+            _auto_log(f"⏰ 挂单 {po['side']} @{po['entry']} 查询失败({exc})，移除跟踪", success=True)
+            continue
+        if state in ("filled", "partially_filled"):
+            with _auto_trade_lock:
+                _auto_pending_orders.pop(oid, None)
+                for h in reversed(_auto_trade_history):
+                    if str(h.get("ord_id")) == oid:
+                        h["status"] = "filled"
+                        h["fill_px"] = od.get("fillPx") or od.get("avgPx")
+                        break
+            _save_auto_trade_state()
+            _auto_log(f"✅ 挂单已成交 {po['side']} {po['size']}张 @{po['entry']}（持仓进入SL/TP管理）", success=True)
+        elif state in ("canceled",):
+            with _auto_trade_lock:
+                _auto_pending_orders.pop(oid, None)
+        else:
+            # 未成交 → 撤单，信号作废
+            try:
+                client.cancel_limit_order(po["ticker"], ord_id=oid)
+                _auto_log(f"⏰ 第N+1根收盘未成交，撤单 {po['side']} {po['size']}张 @{po['entry']}（信号作废，不再补挂）", success=None)
+            except Exception as exc:
+                _auto_log(f"⚠️ 撤单失败 {po['side']} @{po['entry']}: {exc}（下一轮重试）", success=False)
+                continue
+            with _auto_trade_lock:
+                _auto_pending_orders.pop(oid, None)
+                for h in reversed(_auto_trade_history):
+                    if str(h.get("ord_id")) == oid:
+                        h["status"] = "expired"
+                        break
+            _save_auto_trade_state()
 
 
 def _auto_log(msg: str, success: bool | None = None):
-    """记录自动交易日志（最多50条）。"""
-    import datetime
+    """记录自动交易日志（最多50条）并持久化。"""
     ts = datetime.datetime.now().strftime("%H:%M:%S")
     entry = {"time": ts, "msg": msg, "success": success}
     with _auto_trade_lock:
         _auto_trade_log.append(entry)
-        if len(_auto_trade_log) > 50:
+        if len(_auto_trade_log) > 200:
             _auto_trade_log.pop(0)
+    _save_auto_trade_state()
 
 
 def _start_auto_trade_thread():
@@ -814,6 +1225,56 @@ def _start_auto_trade_thread():
         _auto_trade_thread.start()
 
 
+@app.route("/api/order/cancel", methods=["POST"])
+def api_order_cancel():
+    """撤销未成交的限价委托（撤单）。
+
+    Body JSON: {"ticker": "BTC-USDT-SWAP", "ord_id": "..."}（ord_id 必选，
+    也可传 cl_ord_id 二选一）。未配置凭证时返回 mock 提示，不伪装成功。
+    """
+    data = request.get_json(silent=True) or {}
+    ticker = (data.get("ticker") or DEFAULT_TICKER).upper()
+    ord_id = str(data.get("ord_id") or "").strip()
+    cl_ord_id = str(data.get("cl_ord_id") or "").strip()
+
+    if ticker not in ALLOWED_TICKERS:
+        return jsonify({"error": f"暂只支持 {sorted(ALLOWED_TICKERS)}"}), 400
+    if not ord_id and not cl_ord_id:
+        return jsonify({"error": "缺少 ord_id 或 cl_ord_id"}), 400
+
+    client, cfg_err = get_trade_client()
+    if client is None:
+        return jsonify({
+            "status": "ok",
+            "mock": True,
+            "mock_reason": cfg_err or "DASH_ORDER_SIMULATED=0（下单模拟模式）",
+            "ord_id": ord_id,
+            "ticker": ticker,
+            "account_mode": account_mode(),
+            "message": f"[mock] 已模拟撤单 {ticker} 订单 {ord_id or cl_ord_id}",
+        })
+
+    pos_side_ = None
+    try:
+        result = client.cancel_limit_order(
+            inst_id=ticker, ord_id=ord_id or None, cl_ord_id=cl_ord_id or None,
+        )
+        return jsonify({
+            "status": "ok",
+            "mock": False,
+            "account_mode": account_mode(),
+            "ticker": ticker,
+            "ord_id": result.get("ordId") or ord_id,
+            "message": f"[{'模拟盘🟢' if account_mode() == 'simulated' else '实盘🔴'}] "
+                       f"撤单成功 {ticker} 订单 {result.get('ordId') or ord_id}",
+        })
+    except OKXTradeError as exc:
+        return jsonify({"error": f"撤单失败: {exc}", "mock": False,
+                        "account_mode": account_mode()}), 502
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"撤单异常: {exc}", "mock": False}), 502
+
+
 @app.route("/api/auto-trade", methods=["GET"])
 def api_auto_trade_get():
     """获取自动交易状态和配置。"""
@@ -821,22 +1282,59 @@ def api_auto_trade_get():
         cfg = dict(_auto_trade_config)
         log = list(_auto_trade_log)
         positions = {k: {kk: vv for kk, vv in v.items()} for k, v in _auto_trade_positions.items()}
-    return jsonify({"config": cfg, "log": log[-20:], "positions": positions})
+        history = list(_auto_trade_history)
+        pending = list(_auto_pending_orders.values())
+    return jsonify({"config": cfg, "account_mode": account_mode(), "log": log[-60:],
+                    "history": history[-50:], "positions": positions, "pending": pending})
 
 
 @app.route("/api/auto-trade", methods=["POST"])
 def api_auto_trade_update():
-    """更新自动交易配置。"""
+    """开始自动交易：复用表盘当前参数（快照），运行中不可改，只能暂停。
+
+    前端把表盘当前参数整包传过来：
+    ticker / interval / limit / scan_window / volume_filter /
+    trend_period(0=关) / ma_type / max_open_trades / cooldown_seconds / min_rr_ratio
+    """
     data = request.get_json(silent=True) or {}
     with _auto_trade_lock:
-        for key in _auto_trade_config:
+        if _auto_trade_config["enabled"]:
+            return jsonify({
+                "status": "error",
+                "message": "自动交易运行中，参数已锁定；请先暂停再重新开始",
+            }), 409
+        # 快照表盘参数（只接受白名单字段，缺省用当前默认值）
+        for key in ("ticker", "interval", "ma_type"):
+            if data.get(key):
+                _auto_trade_config[key] = str(data[key]).upper() if key == "ticker" else str(data[key])
+        for key in ("limit", "scan_window", "max_open_trades",
+                    "cooldown_seconds", "trend_period"):
             if key in data:
-                _auto_trade_config[key] = data[key]
+                try:
+                    _auto_trade_config[key] = max(0, int(data[key]))
+                except (TypeError, ValueError):
+                    pass
+        if "min_rr_ratio" in data:
+            try:
+                _auto_trade_config["min_rr_ratio"] = min(5.0, max(1.0, float(data["min_rr_ratio"])))
+            except (TypeError, ValueError):
+                pass
+        if "max_leverage" in data:
+            try:
+                _auto_trade_config["max_leverage"] = min(10.0, max(0.1, float(data["max_leverage"])))
+            except (TypeError, ValueError):
+                pass
+        if "volume_filter" in data:
+            _auto_trade_config["volume_filter"] = bool(data["volume_filter"])
+        # 趋势：trend_period>0 即启用
+        _auto_trade_config["trend_filter"] = _auto_trade_config["trend_period"] > 0
+        _auto_trade_config["enabled"] = True
         cfg = dict(_auto_trade_config)
 
-    if cfg["enabled"]:
-        _start_auto_trade_thread()
-
+    _start_auto_trade_thread()
+    _auto_log(f"🚀 自动交易开始：{cfg['ticker']} {cfg['interval']} "
+              f"量能:{'开' if cfg['volume_filter'] else '关'} "
+              f"趋势:{cfg['trend_period'] or '关'}")
     return jsonify({"status": "ok", "config": cfg})
 
 
@@ -845,6 +1343,7 @@ def api_auto_trade_stop():
     """停止自动交易。"""
     with _auto_trade_lock:
         _auto_trade_config["enabled"] = False
+    _save_auto_trade_state()
     return jsonify({"status": "ok", "message": "自动交易已停止"})
 
 

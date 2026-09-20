@@ -29,7 +29,7 @@ class TestDashboardAPI(unittest.TestCase):
                 self.assertIn(k, bar)
 
     def test_klines_unsupported_ticker(self):
-        resp = self.client.get("/api/klines?ticker=ETH-USDT-SWAP")
+        resp = self.client.get("/api/klines?ticker=SOL-USDT-SWAP")
         self.assertEqual(resp.status_code, 400)
 
     def test_signals_format(self):

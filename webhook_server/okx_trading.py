@@ -44,6 +44,7 @@ import httpx
 # 模拟盘使用与实盘相同的主机，仅靠 x-simulated-trading: 1 头区分（OKX 官方约定）
 OKX_BASE = os.getenv("OKX_BASE", "https://www.okx.com")
 ORDER_PATH = "/api/v5/trade/order"      # 下单（限价 + 可附带止盈止损）
+SET_LEVERAGE_PATH = "/api/v5/account/set-leverage"   # 设置合约杠杆倍数
 
 
 class OKXConfigError(RuntimeError):
@@ -186,6 +187,41 @@ class OKXTradingClient:
         payload = self._parse_response(resp, ORDER_PATH, body_obj)
         return payload
 
+    def set_leverage(
+        self,
+        inst_id: str,
+        lever: str,
+        pos_side: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """设置该交易对的杠杆倍数（下单前调用；逐仓/对冲模式需指定 posSide）。
+
+        Args:
+            inst_id: 交易对，如 BTC-USDT-SWAP
+            lever: 杠杆倍数字符串，如 "3"（OKX 允许 1~125 的小数倍数）
+            pos_side: 持仓方向 long / short；对冲(hedge)模式下必填，
+                单币种净/买卖模式下会被忽略
+
+        Returns:
+            OKX 响应 data[0]，含 instId / lever / posSide
+
+        Raises:
+            OKXTradeError: 网络/交易所失败
+        """
+        body_obj: dict[str, Any] = {
+            "instId": inst_id,
+            "lever": str(lever),
+            "mgnMode": "cross",     # 与 place_limit_order 的 tdMode='cross' 一致
+        }
+        if pos_side:
+            body_obj["posSide"] = pos_side
+        body_str = json.dumps(body_obj)
+        resp = self._client.post(
+            f"{OKX_BASE}{SET_LEVERAGE_PATH}",
+            headers=self._headers("POST", SET_LEVERAGE_PATH, body_str),
+            content=body_str,
+        )
+        return self._parse_response(resp, SET_LEVERAGE_PATH, body_obj)
+
     # ------------------------------------------------------------------
     # 账户查询（余额 / 仓位 / 订单历史）
     # ------------------------------------------------------------------
@@ -266,6 +302,69 @@ class OKXTradingClient:
                 "limit": limit,
             },
         )
+
+    def get_order(
+        self,
+        inst_id: str,
+        ord_id: str | None = None,
+        cl_ord_id: str | None = None,
+    ) -> dict:
+        """查询单个订单状态（state: live/partially_filled/filled/canceled）。
+
+        与 _parse_response 不同：查单接口 data[0] 无 sCode，直接返回原始字典。
+
+        Raises:
+            OKXTradeError: 网络失败 / 订单不存在
+        """
+        params = {"instId": inst_id}
+        if ord_id:
+            params["ordId"] = str(ord_id)
+        if cl_ord_id:
+            params["clOrdId"] = str(cl_ord_id)
+        data = self._request_private_get("/api/v5/trade/order", params)
+        if not data:
+            raise OKXTradeError("订单不存在或已归档")
+        return data[0]
+
+    def cancel_limit_order(
+        self,
+        inst_id: str,
+        ord_id: str | None = None,
+        cl_ord_id: str | None = None,
+    ) -> dict:
+        """撤销未成交的限价单。
+
+        Returns:
+            data[0] 字典，含 ordId / sCode / sMsg
+
+        Raises:
+            OKXTradeError: 撤单失败（如订单不存在/已撤销）
+        """
+        body: dict[str, Any] = {"instId": inst_id}
+        if ord_id:
+            body["ordId"] = str(ord_id)
+        if cl_ord_id:
+            body["clOrdId"] = str(cl_ord_id)
+        path = "/api/v5/trade/cancel-order"
+        body_str = json.dumps(body)
+        resp = self._client.post(
+            f"{OKX_BASE}{path}",
+            headers=self._headers("POST", path, body_str),
+            content=body_str,
+        )
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise OKXTradeError(f"HTTP {exc.response.status_code} 撤单失败") from exc
+        payload = resp.json()
+        if payload.get("code") != "0":
+            raise OKXTradeError(
+                f"OKX 返回错误码 {payload.get('code')}: {payload.get('msg')}"
+            )
+        data = payload.get("data") or []
+        if not data:
+            raise OKXTradeError(f"撤单未返回数据: {payload}")
+        return data[0]
 
     def get_pending_orders(self, inst_id: str, limit: int = 20) -> list[dict]:
         """获取当前挂单（未成交）。

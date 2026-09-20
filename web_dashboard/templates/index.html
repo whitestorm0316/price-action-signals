@@ -104,7 +104,7 @@
 </head>
 <body data-page-node-id="hHDcZ98acbJLkcKfcDcVne">
   <h1 data-page-node-id="TEMRiEAgZBRStsPbbKuIm2">价格行为信号仪表盘</h1>
-  <div class="sub" data-page-node-id="paWBnnuHgRpTTSQcpaXzm1">OKX 模拟盘 · 只读展示 + 手动下单（当前下单为 mock）</div>
+  <div class="sub" data-page-node-id="paWBnnuHgRpTTSQcpaXzm1"><span id="sub-account-mode">🟢 模拟盘 · 只读展示 + 手动下单</span></div>
 
   <div class="toolbar" data-page-node-id="cJNHH8pjJQECnWrhz9Y1HL">
     <label data-page-node-id="ep2X191Evxw964PNxV72W5">交易对 <select id="ticker" data-page-node-id="pIsq5KzhBTW24LnzrDeS4X"></select></label>
@@ -120,17 +120,21 @@
     </label>
     <label>K线数量 <input id="limit" type="number" value="100" min="30" max="3000" style="width:70px" title="最多3000；OKX最近行情端点约保留1440根(5m/1H)，超出部分拉不到"></label>
     <label>扫描窗口 <input id="scan" type="number" value="100" min="10" max="3000" style="width:70px" title="检查最近多少根K线里的信号"></label>
+    <label title="最大杠杆倍数：每笔名义仓位 ≤ 余额×倍数÷10笔并发。默认3，可动态调整">
+      仓位倍数 <input id="risk-lev" type="number" value="3" min="0.1" max="10" step="0.5" style="width:60px" onchange="refreshAll()" title="决定每笔仓位预算上限（余额×倍数÷最大持仓数）。影响面板建议张数与自动交易快照中的杠杆倍数。">
+    </label>
     <label title="仅确认或降级价格行为信号；缩量且盈亏比小于2时过滤">
       <input id="volume-on" type="checkbox" checked> 量能确认
     </label>
     <label><input id="volume-visible" type="checkbox" checked> 显示成交量</label>
     <button onclick="refreshAll()">刷新</button>
     <button class="secondary" onclick="openConfig()">设置</button>
+    <span id="account-mode-badge" data-mode="simulated" title="当前交易账户模式（在 设置 中切换）" style="font-size:12px;font-weight:700;padding:4px 10px;border-radius:6px;background:#26a69a;color:#fff;user-select:none">🟢 模拟盘</span>
     <button class="secondary" onclick="openTrendSettings()" title="趋势交易：均线过滤+方向过滤">📈 趋势</button>
     <button class="secondary" onclick="toggleAccount()" title="查看余额 / 当前仓位 / 下单历史 / 挂单">账户</button>
     <button class="secondary" id="auto-trade-btn" onclick="toggleAutoTrade()" title="自动交易：扫描信号并自动下单">🤖 自动</button>
     <label style="display:flex;align-items:center;gap:4px;" data-page-node-id="6t4MDdmf52yDprbXyYw844">
-      <input id="poll" type="checkbox" checked data-page-node-id="6GnxhZrPuTd2WG0722pfEV"> 自动轮询(30s)
+      <input id="poll" type="checkbox" checked data-page-node-id="6GnxhZrPuTd2WG0722pfEV"> 自动轮询(5s)
     </label>
     <span id="status" data-page-node-id="wkyN2LGbKfdy38lC1KaaZs"></span>
   </div>
@@ -143,7 +147,8 @@
   <div class="table-wrap" data-page-node-id="l3ssCgcRwgw6EU1nFglaxv">
     <h2 data-page-node-id="BLU0CoIjE4jGAEvurEvABq">最近信号</h2>
     <div id="signal-summary" class="summary" aria-live="polite"></div>
-    <div id="summary-note" class="note">汇总当前扫描窗口内、过滤后保留的信号。胜率 = 成功 /（成功 + 失败），不含持仓中；未计手续费与滑点。</div>
+    <div id="summary-note" class="note">🚧 = 进行中K线的信号（未收盘，形态可能重绘消失，自动交易**只交易已收盘K线**的信号）。
+汇总当前扫描窗口内、过滤后保留的信号。胜率 = 成功 /（成功 + 失败），不含持仓中；未计手续费与滑点。</div>
     <div id="signals-table" data-page-node-id="h45NpHLiFOSQ9YJyTCQoFJ">
       <div class="empty" data-page-node-id="9siWn8EXWszqm8sDPNeIez">暂无信号，请点击「刷新」。</div>
     </div>
@@ -153,13 +158,22 @@
   <!-- 设置弹窗：OKX 模拟盘凭证 + 代理，保存后自动写入 .env 并热更新 -->
   <div id="config-modal" class="modal-overlay" hidden>
     <div class="modal">
-      <h2>OKX 模拟盘设置</h2>
+      <h2 id="cfg-title">OKX 模拟盘设置</h2>
       <p class="note">保存后自动写入本地 <code>.env</code> 文件并立即生效（无需重启）。
         凭证仅保存在本机，不会上传。模拟盘交易始终带 <code>x-simulated-trading:1</code>，绝不碰实盘。</p>
       <label>API Key<br><input id="cfg-key" type="text" autocomplete="off" placeholder="e864...4267"></label>
       <label>API Secret<br><input id="cfg-secret" type="password" autocomplete="off" placeholder="B460...10FB"></label>
       <label>Passphrase<br><input id="cfg-pass" type="password" autocomplete="off" placeholder="模拟盘 Passphrase"></label>
       <label>代理 OKX_PROXY<br><input id="cfg-proxy" type="text" autocomplete="off" placeholder="http://127.0.0.1:1087"></label>
+
+      <label style="margin-top:10px">账户模式<span style="color:#f0b35a;font-size:11px">（实盘 = 直接交易真实资金）</span></label>
+      <div style="display:flex;gap:10px;margin-top:2px">
+        <button id="cfg-mode-sim" onclick="pickAccountMode('simulated')" style="flex:1;background:#26a69a;color:#fff;border:2px solid transparent;border-radius:6px;padding:10px;font-size:14px;font-weight:700">🟢 模拟盘</button>
+        <button id="cfg-mode-real" onclick="pickAccountMode('real')" style="flex:1;color:#fff;border:2px solid transparent;border-radius:6px;padding:10px;font-size:14px;font-weight:700;background:#363a45">🔴 实盘</button>
+      </div>
+      <div id="cfg-mode-warning" style="display:none;margin-top:8px;padding:8px;border:1px solid #ef5350;border-radius:6px;color:#ef5350;font-size:12px">
+        ⚠️ 实盘注意事项：下单直接吃真实资金并产生真实手续费；请确认上方凭证是【实盘】API Key（模拟盘 Key 调实盘会被拒）。切换立即对订单生效。
+      </div>
       <div id="config-status"></div>
       <div class="modal-actions">
         <button class="secondary" onclick="closeConfig()">关闭</button>
@@ -195,45 +209,18 @@
   <!-- 自动交易弹窗 -->
   <div id="auto-trade-modal" class="modal-overlay" hidden>
     <div class="modal" style="width:min(480px,95vw)">
-      <h2>🤖 自动交易设置</h2>
+      <h2>🤖 自动交易</h2>
+      <p class="note">开始后复用表盘当前参数（交易对 / 周期 / K线数 / 扫描窗口 / 量能 / 趋势）。运行中参数锁定不可修改，只能暂停；重新开始会采用当时的表盘参数。</p>
+      <div id="at-status" class="note" style="margin:8px 0;">⏸️ 已暂停</div>
 
       <div style="margin:12px 0;">
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-          <input id="at-enabled" type="checkbox" onchange="updateAutoTrade()">
-          <span style="font-weight:600;">启用自动交易</span>
-        </label>
-        <div id="at-status" class="note" style="margin-top:4px;">未启用</div>
+        <div style="font-size:13px;color:#b2b5be;margin-bottom:4px;">运行参数（快照）</div>
+        <div id="at-params" style="background:#131722;border-radius:4px;padding:8px;font-size:12px;font-family:monospace;color:#d1d4dc;">尚未开始</div>
       </div>
 
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:12px 0;font-size:13px;">
-        <label>扫描周期
-          <select id="at-interval" onchange="updateAutoTrade()" style="width:100%;background:#131722;color:#d1d4dc;border:1px solid #363a45;border-radius:4px;padding:4px;margin-top:2px;">
-            <option value="5m" selected>5分钟</option>
-            <option value="15m">15分钟</option>
-            <option value="1H">1小时</option>
-          </select>
-        </label>
-        <label>扫描窗口
-          <input id="at-scan" type="number" value="50" min="10" max="300" style="width:100%;background:#131722;color:#d1d4dc;border:1px solid #363a45;border-radius:4px;padding:4px;margin-top:2px;">
-        </label>
-        <label>最大同时持仓
-          <input id="at-max" type="number" value="10" min="1" max="50" style="width:100%;background:#131722;color:#d1d4dc;border:1px solid #363a45;border-radius:4px;padding:4px;margin-top:2px;">
-        </label>
-        <label>冷却时间（秒）
-          <input id="at-cooldown" type="number" value="300" min="60" max="3600" step="60" style="width:100%;background:#131722;color:#d1d4dc;border:1px solid #363a45;border-radius:4px;padding:4px;margin-top:2px;">
-        </label>
-        <label>最小盈亏比
-          <input id="at-rr" type="number" value="1.5" min="1" max="5" step="0.1" style="width:100%;background:#131722;color:#d1d4dc;border:1px solid #363a45;border-radius:4px;padding:4px;margin-top:2px;">
-        </label>
-        <label style="display:flex;align-items:center;gap:6px;margin-top:18px;">
-          <input id="at-volume" type="checkbox"> 量能过滤
-        </label>
-        <label style="display:flex;align-items:center;gap:6px;margin-top:18px;">
-          <input id="at-trend" type="checkbox" onchange="document.getElementById('at-trend-period').disabled=!this.checked"> 趋势过滤
-        </label>
-        <label>均线周期
-          <input id="at-trend-period" type="number" value="50" min="5" max="200" disabled style="width:100%;background:#131722;color:#d1d4dc;border:1px solid #363a45;border-radius:4px;padding:4px;margin-top:2px;">
-        </label>
+      <div style="margin:12px 0;">
+        <div style="font-size:13px;color:#b2b5be;margin-bottom:4px;">已成交历史（重启不丢失）</div>
+        <div id="at-history" style="background:#131722;border-radius:4px;padding:8px;max-height:150px;overflow-y:auto;font-size:12px;font-family:monospace;color:#d1d4dc;">暂无成交</div>
       </div>
 
       <div style="margin:12px 0;">
@@ -243,7 +230,7 @@
 
       <div class="modal-actions">
         <button class="secondary" onclick="closeAutoTrade()">关闭</button>
-        <button class="order-btn" onclick="saveAutoTrade()" style="padding:6px 16px;">保存设置</button>
+        <button id="at-toggle-btn" class="order-btn" onclick="toggleAutoTradeRun()" style="padding:6px 16px;">▶ 开始交易</button>
       </div>
     </div>
   </div>
@@ -295,6 +282,8 @@
     <div class="modal" style="width:min(500px,95vw)">
       <h2 id="order-modal-title">确认下单</h2>
 
+      <div id="om-warn" style="display:none;font-size:12px;color:#ef5350;margin:6px 0 0"></div>
+      <div id="om-mode-banner" style="font-size:12px;font-weight:700;margin:6px 0 0">🟢 当前为模拟盘账户（不涉及真实资金）</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;margin:12px 0;font-size:13px;">
         <div><span style="color:#b2b5be">方向</span> <span id="om-side" class="badge buy" style="font-size:13px">BUY</span></div>
         <div><span style="color:#b2b5be">策略</span> <span id="om-strategy" class="mono">-</span></div>
@@ -308,10 +297,25 @@
         <label style="font-size:13px;color:#b2b5be;display:block;margin-bottom:6px;">合约张数（可调整）</label>
         <div style="display:flex;align-items:center;gap:8px;">
           <button class="secondary" onclick="adjOrderSize(-1)" style="padding:4px 10px;font-size:16px">−</button>
-          <input id="om-size" type="number" min="1" value="1" style="width:80px;text-align:center;font-size:16px;font-weight:700;background:#1e222d;color:#d1d4dc;border:1px solid #363a45;border-radius:4px;padding:6px;">
+          <input id="om-size" type="number" step="any" value="1" oninput="updateOrderModalStats()" style="width:80px;text-align:center;font-size:16px;font-weight:700;background:#1e222d;color:#d1d4dc;border:1px solid #363a45;border-radius:4px;padding:6px;">
           <button class="secondary" onclick="adjOrderSize(1)" style="padding:4px 10px;font-size:16px">+</button>
           <button class="secondary" onclick="setOrderSizeMax()" style="font-size:11px;padding:4px 8px">最大</button>
         </div>
+        <div id="om-face-hint" style="font-size:11px;color:#b2b5be;margin-top:5px">OKX 最低 1 张，张数必须为整数；输入小数将自动取整</div>
+
+      <div style="margin-top:12px;">
+        <label style="font-size:13px;color:#b2b5be;display:block;margin-bottom:6px;">合约杠杆倍数（下单前对当前交易对设置）</label>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <select id="om-lever" onchange="updateOrderModalStats()" style="background:#1e222d;color:#d1d4dc;border:1px solid #363a45;border-radius:4px;padding:6px 10px;font-size:14px;">
+            <option value="1">1x 逐级保证金（全额）</option>
+            <option value="2">2x</option>
+            <option value="3" selected>3x（默认）</option>
+            <option value="5">5x</option>
+            <option value="10">10x</option>
+          </select>
+          <span style="font-size:11px;color:#b2b5be">占用保证金 = 仓位价值 ÷ 倍数</span>
+        </div>
+      </div>
       </div>
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;margin:12px 0;font-size:13px;">
@@ -335,8 +339,8 @@
 
 <script>
 // ---- 配置 ----
-const TICKERS = ["BTC-USDT-SWAP"];          // 后端只允许这些
-const POLL_MS = 30000;
+const TICKERS = ["BTC-USDT-SWAP", "ETH-USDT-SWAP"];          // 后端只允许这些
+const POLL_MS = 5000;   // 5秒轮询（后端已做增量拉取，只拉最新3根K线）
 // 买入=绿, 卖出=红
 const COLORS = { BUY: "#26a69a", SELL: "#ef5350" };
 const LINESTYLES = { entry: 0, sl: 2, tp: 1 }; // 实线/虚线/点线(近似)
@@ -416,6 +420,38 @@ async function loadKlines() {
   return await resp.json();
 }
 
+// 自动交易运行中时，表盘参数锁定为与自动交易快照一致
+//（避免表盘/自动交易参数不一致导致"表盘没信号、自动交易却有"）
+let _atParamsSyncedAt = 0;
+async function syncParamsFromAutoTrade() {
+  if (Date.now() - _atParamsSyncedAt < 5000) return;   // 5s内已同步过，跳过
+  try {
+    const at = await fetch('/api/auto-trade');
+    const atData = await at.json();
+    const atCfg = atData.config;
+    if (atData.account_mode) {
+      _accountModeSaved = atData.account_mode;
+      updateAccountModeBadge(atData.account_mode);
+    }
+    // 同步工具栏"🤖 自动"按钮颜色（否则刷新页面后按钮颜色会重置，即使仍在自动交易）
+    const mainBtn = document.getElementById('auto-trade-btn');
+    if (mainBtn) {
+      mainBtn.style.background = atCfg.enabled ? '#26a69a' : '';
+      mainBtn.style.color = atCfg.enabled ? '#fff' : '';
+      mainBtn.title = atCfg.enabled
+        ? '自动交易运行中（点击打开监控面板）'
+        : '自动交易：扫描信号并自动下单';
+    }
+    if (atCfg.enabled) {
+      document.getElementById('interval').value = atCfg.interval;
+      document.getElementById('limit').value = atCfg.limit;
+      document.getElementById('scan').value = atCfg.scan_window;
+      document.getElementById('volume-on').checked = atCfg.volume_filter;
+    }
+    _atParamsSyncedAt = Date.now();
+  } catch (e) {}
+}
+
 async function loadSignals() {
   const params = new URLSearchParams({
     ticker: tickerEl.value,
@@ -426,6 +462,10 @@ async function loadSignals() {
   });
   // 信号扫描窗口：检查最近多少根 K 线里的信号（决定表格/图表显示多少信号）
   params.set('scan', document.getElementById('scan').value || '100');
+  // 仓位倍数（动态可调）：默认3，改动后立即生效
+  const levEl = document.getElementById('risk-lev');
+  const lev = parseFloat(levEl ? levEl.value : '3');
+  if (lev > 0 && lev !== 3) params.set('max_lev', String(lev));
   // 趋势交易：勾选后启用均线趋势过滤（只顺势交易）
   const trendOnEl = document.getElementById('trend-on');
   const trendOn = trendOnEl ? trendOnEl.checked : true;  // 默认开启
@@ -527,14 +567,15 @@ function renderSummary(volumeEnabled) {
   const avgRR = currentSignals.length
     ? (currentSignals.reduce((a, s) => a + (s.risk_reward_ratio || 0), 0) / currentSignals.length).toFixed(2)
     : '—';
-  const riskPct = currentSignals[0]?.risk_pct || 1;
-  const positionPct = currentSignals[0]?.position_pct || 10;
-  const maxTrades = Math.round(100 / positionPct); // 100% / position% = 最大可并行笔数
+  const riskPct = currentSignals[0]?.position_pct || 1; // 单笔风险比例（%）
+  const maxNotional = _omAvailBal > 0 ? _omAvailBal * 3 : 0;
+  const totalNotional = currentSignals.reduce((a, s) => a + (s.notional || 0), 0);
+  const overCap = maxNotional > 0 && totalNotional > maxNotional;
   const metrics = [
     ['信号总数', currentSignals.length, `买入 ${count('action','BUY')} / 卖出 ${count('action','SELL')} · 过滤后（盈亏比≥1.5）`],
-    ['仓位管理', `${positionPct}% 仓位（价格行为止损止盈）`, `每笔仓位=总权益×${positionPct}% · 最大并行~${maxTrades}笔`],
+    ['仓位管理', `单笔风险 ${riskPct}%（固定风险比例）`, `止损触及亏损=余额×${riskPct}% · 每笔名义仓位≤余额×3÷10笔`],
     ['平均盈亏比', avgRR, `最高 ${currentSignals.reduce((m,s)=>Math.max(m,s.risk_reward_ratio||0),0).toFixed(2)}`],
-    ['建议总张数', `${totalContracts.toLocaleString()} 张`, `全部信号同时持仓`],
+    ['建议总张数', `${totalContracts.toLocaleString()} 张`, `名义仓位合计 ${totalNotional.toLocaleString('en-US',{maximumFractionDigits:0})} USDT${overCap ? '（⚠️超3倍上限，会被截断）' : ''}`],
     ['预计总盈利', `+${totalProfit.toLocaleString('en-US',{maximumFractionDigits:0})} USDT`, '全部止盈时'],
     ['预计总亏损', `-${totalLoss.toLocaleString('en-US',{maximumFractionDigits:0})} USDT`, '全部止损时'],
     ['历史结果', `${win} / ${loss} / ${open}`, '成功 / 失败 / 持仓中'],
@@ -564,10 +605,11 @@ function renderSignalsTable() {
     const rrCls = rr >= 2 ? 'win' : rr >= 1.5 ? 'open' : 'loss';
     // 建议张数是否可下单
     const canOrder = s.suggested_contracts > 0;
+    const forming = s.forming ? ' 🚧' : '';
     return `
-    <tr${selected} data-idx="${i}" title="点击在图上显示该信号">
+    <tr${selected} data-idx="${i}" title="${s.forming ? '进行中K线信号（未收盘，可能重绘消失，自动交易不交易）' : '点击在图上显示该信号'}">
       <td><span class="badge ${s.action === 'BUY' ? 'buy' : 'sell'}">${s.action}</span></td>
-      <td class="mono">${s.strategy}</td>
+      <td class="mono">${s.strategy}${forming}</td>
       <td class="mono">${fmt(s.price)}</td>
       <td class="mono">${fmt(s.sl)}</td>
       <td class="mono">${fmt(s.tp)}</td>
@@ -626,8 +668,21 @@ function openOrderModal(idx) {
   document.getElementById('om-sl').textContent = Number(s.sl).toFixed(2);
   document.getElementById('om-tp').textContent = Number(s.tp).toFixed(2);
 
-  // 默认张数 = 建议张数
+  // 默认张数 = 建议张数；默认杠杆跟随表盘"仓位倍数"
   document.getElementById('om-size').value = s.suggested_contracts;
+  const levEl = document.getElementById('om-lever');
+  const toolLev = parseFloat(document.getElementById('risk-lev') ? document.getElementById('risk-lev').value : '3') || 3;
+  if (levEl) {
+    const opts = [...levEl.options].map(o => parseFloat(o.value));
+    levEl.value = opts.includes(toolLev) ? String(toolLev) : (toolLev < 2 ? '1' : toolLev <= 3 ? '3' : toolLev <= 5 ? '5' : '10');
+  }
+  const faceHint = document.getElementById('om-face-hint');
+  if (faceHint) {
+    const ccy = (s.ticker || 'BTC-USDT-SWAP').split('-')[0];
+    const minSz2 = numberOrNull(s.min_sz) || 1;
+    const lot2 = numberOrNull(s.lot_sz) || 1;
+    faceHint.textContent = `1张 = ${s.face_value || 0.01} ${ccy} · 最小 ${minSz2} 张（≈${(minSz2 * (s.face_value || 0.01)).toPrecision(3)} ${ccy}）· 步长 ${lot2} 张，输入将按步长归一`;
+  }
 
   // 更新确认按钮文字
   document.getElementById('om-confirm-btn').textContent = `确认下单 ${s.action}`;
@@ -729,8 +784,8 @@ async function saveTrendSettings() {
   }
   maTypeEl.value = type;
 
+  saveDashboardParams();
   closeTrendSettings();
-  toast('success', '✅ 趋势设置已保存', `${enabled ? '启用' : '关闭'} ${type} ${period}周期`);
   refreshAll();
 }
 
@@ -747,31 +802,106 @@ function closeAutoTrade() {
   _autoTradeVisible = false;
 }
 
+// 读取表盘当前参数（复用给自动交易）
+function gatherDashboardParams() {
+  const trendOn = document.getElementById('trend-on');
+  const trendPeriodEl = document.getElementById('trend-period');
+  const maTypeEl = document.getElementById('ma-type');
+  const trendEnabled = trendOn ? trendOn.checked : false;
+  const trendPeriod = trendEnabled ? (parseInt(trendPeriodEl ? trendPeriodEl.value : '50') || 50) : 0;
+  const maType = maTypeEl ? maTypeEl.value : 'sma';
+  const levEl = document.getElementById('risk-lev');
+  return {
+    ticker: document.getElementById('ticker').value,
+    interval: document.getElementById('interval').value,
+    limit: parseInt(document.getElementById('limit').value) || 100,
+    scan_window: parseInt(document.getElementById('scan').value) || 50,
+    volume_filter: document.getElementById('volume-on').checked,
+    trend_period: trendPeriod,
+    ma_type: maType,
+    max_open_trades: 10,
+    cooldown_seconds: 300,
+    min_rr_ratio: 1.5,
+    max_leverage: parseFloat(levEl ? levEl.value : '3') || 3,
+  };
+}
+
+// 开始 / 暂停自动交易
+async function toggleAutoTradeRun() {
+  const running = document.getElementById('at-toggle-btn').dataset.running === '1';
+  try {
+    if (running) {
+      await fetch('/api/auto-trade/stop', { method: 'POST' });
+      toast('info', '⏸️ 自动交易已暂停', '参数已保留；重新开始将使用表盘当前参数');
+    } else {
+      const cfg = gatherDashboardParams();
+      const resp = await fetch('/api/auto-trade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cfg),
+      });
+      const data = await resp.json();
+      if (!resp.ok) { toast('error', '开始失败', data.message || resp.statusText); }
+      else {
+        toast('success', '🚀 自动交易已开始', `${cfg.ticker} ${cfg.interval} · 每30秒扫描最新K线信号`);
+      }
+    }
+    loadAutoTradeStatus();
+  } catch (e) {
+    toast('error', '操作失败', e.message);
+  }
+}
+
+function renderAutoTradeParams(cfg) {
+  const el = document.getElementById('at-params');
+  if (!cfg.enabled && !cfg.interval) { el.textContent = '尚未开始'; return; }
+  const trendTxt = cfg.trend_period > 0 ? `${(cfg.ma_type || 'sma').toUpperCase()}${cfg.trend_period}` : '关';
+  el.textContent =
+    `交易对: ${cfg.ticker}   周期: ${cfg.interval}   K线数: ${cfg.limit}\n` +
+    `扫描窗口: ${cfg.scan_window}   量能: ${cfg.volume_filter ? '开' : '关'}   趋势: ${trendTxt}\n` +
+    `最大持仓: ${cfg.max_open_trades}   冷却: ${cfg.cooldown_seconds}s   最小盈亏比: ${cfg.min_rr_ratio}`;
+}
+
 async function loadAutoTradeStatus() {
   try {
     const resp = await fetch('/api/auto-trade');
     const data = await resp.json();
     const cfg = data.config;
-    document.getElementById('at-enabled').checked = cfg.enabled;
-    document.getElementById('at-interval').value = cfg.interval;
-    document.getElementById('at-scan').value = cfg.scan_window;
-    document.getElementById('at-max').value = cfg.max_open_trades;
-    document.getElementById('at-cooldown').value = cfg.cooldown_seconds;
-    document.getElementById('at-rr').value = cfg.min_rr_ratio;
-    document.getElementById('at-volume').checked = cfg.volume_filter;
-    document.getElementById('at-trend').checked = cfg.trend_filter || (cfg.trend_period > 0);
-    document.getElementById('at-trend-period').value = cfg.trend_period || 50;
-    document.getElementById('at-trend-period').disabled = !(cfg.trend_filter || cfg.trend_period > 0);
 
-    // 状态
+    // 状态 + 按钮
     const statusEl = document.getElementById('at-status');
-    statusEl.textContent = cfg.enabled ? '✅ 运行中 · 每30秒扫描' : '⏸️ 已停止';
+    const btn = document.getElementById('at-toggle-btn');
+    btn.dataset.running = cfg.enabled ? '1' : '0';
+    btn.textContent = cfg.enabled ? '⏸ 暂停交易' : '▶ 开始交易';
+    statusEl.textContent = cfg.enabled ? '✅ 运行中 · 每30秒扫描最新收盘K线信号（参数锁定）' : '⏸️ 已暂停 · 重新开始将采用表盘当前参数';
     statusEl.style.color = cfg.enabled ? '#26a69a' : '#b2b5be';
 
-    // 按钮颜色
-    const btn = document.getElementById('auto-trade-btn');
-    btn.style.background = cfg.enabled ? '#26a69a' : '';
-    btn.style.color = cfg.enabled ? '#fff' : '';
+    // 工具栏按钮颜色
+    const mainBtn = document.getElementById('auto-trade-btn');
+    mainBtn.style.background = cfg.enabled ? '#26a69a' : '';
+    mainBtn.style.color = cfg.enabled ? '#fff' : '';
+
+    // 挂单跟踪
+    const pendings = data.pending || [];
+    if (pendings.length > 0) {
+      statusEl.textContent += ' · ⏳挂单 ' + pendings.length + '笔（1根K线有效）';
+    }
+
+    renderAutoTradeParams(cfg);
+
+    // 已成交历史
+    const histEl = document.getElementById('at-history');
+    const hist = data.history || [];
+    if (hist.length === 0) {
+      histEl.innerHTML = '<div style="color:#666">暂无成交</div>';
+    } else {
+      const STATUS_META = { pending: ['⏳挂单中', '#e6b85c'], filled: ['✅已成交', '#26a69a'], expired: ['⏰未成交已撤', '#b2b5be'] };
+      histEl.innerHTML = hist.slice().reverse().map(h => {
+        const color = h.side === 'BUY' ? '#26a69a' : '#ef5350';
+        const st = STATUS_META[h.status] || ['', ''];
+        return `<div>[${h.time}] <span style="color:${color}">${h.side}</span> ${h.ticker} ${h.size}张 @ ${h.entry} · SL:${h.sl} TP:${h.tp}${h.risk_amount != null ? ` · 风险:${h.risk_amount}` : ''} <span style="color:${st[1]}">${st[0]}</span></div>`;
+      }).join('');
+    }
 
     // 日志
     const logEl = document.getElementById('at-log');
@@ -779,64 +909,24 @@ async function loadAutoTradeStatus() {
       logEl.innerHTML = '<div style="color:#666">暂无日志</div>';
     } else {
       logEl.innerHTML = data.log.map(l => {
-        const cls = l.success === true ? 'color:#26a69a' : l.success === false ? 'color:#ef5350' : 'color:#b2b5be';
-        return `<div style="${cls};margin-bottom:2px;">[${l.time}] ${l.msg}</div>`;
-      }).reverse().join('');
+        const color = l.success === true ? '#26a69a' : l.success === false ? '#ef5350' : '#b2b5be';
+        return `<div style="color:${color}">[${l.time}] ${l.msg}</div>`;
+      }).join('');
+      logEl.scrollTop = logEl.scrollHeight;
     }
   } catch (e) {
-    console.error('加载自动交易状态失败:', e);
-  }
-}
-
-async function updateAutoTrade() {
-  // 开关变化时立即更新状态
-  const enabled = document.getElementById('at-enabled').checked;
-  try {
-    await fetch('/api/auto-trade', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled }),
-    });
-    loadAutoTradeStatus();
-    toast(enabled ? 'success' : 'info',
-      enabled ? '🤖 自动交易已启用' : '⏸️ 自动交易已停止',
-      enabled ? '每30秒扫描信号并自动下单' : '自动交易已停止');
-  } catch (e) {
-    toast('error', '设置失败', e.message);
-  }
-}
-
-async function saveAutoTrade() {
-  const cfg = {
-    enabled: document.getElementById('at-enabled').checked,
-    interval: document.getElementById('at-interval').value,
-    scan_window: parseInt(document.getElementById('at-scan').value) || 50,
-    max_open_trades: parseInt(document.getElementById('at-max').value) || 10,
-    cooldown_seconds: parseInt(document.getElementById('at-cooldown').value) || 300,
-    min_rr_ratio: parseFloat(document.getElementById('at-rr').value) || 1.5,
-    volume_filter: document.getElementById('at-volume').checked,
-    trend_filter: document.getElementById('at-trend').checked,
-    trend_period: document.getElementById('at-trend').checked ? parseInt(document.getElementById('at-trend-period').value) || 50 : 0,
-    ma_type: 'sma',
-  };
-  try {
-    const resp = await fetch('/api/auto-trade', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(cfg),
-    });
-    const data = await resp.json();
-    toast('success', '✅ 设置已保存', `自动交易: ${cfg.enabled ? '启用' : '停止'}\n扫描周期: ${cfg.interval} · 最大持仓: ${cfg.max_open_trades}`);
-    loadAutoTradeStatus();
-  } catch (e) {
-    toast('error', '保存失败', e.message);
+    console.warn('加载自动交易状态失败:', e);
   }
 }
 
 function adjOrderSize(delta) {
   const el = document.getElementById('om-size');
-  const cur = parseInt(el.value) || 1;
-  el.value = Math.max(1, cur + delta);
+  const s = _omSignal || {};
+  const lot = numberOrNull(s.lot_sz) || 1;
+  const minSz = numberOrNull(s.min_sz) || 1;
+  const step = lot >= 1 ? 1 : 0.1;        // BTC 1张步进；ETH 0.1张步进
+  const cur = parseFloat(el.value) || minSz;
+  el.value = Math.max(minSz, Math.floor((cur + delta * step) / lot + 1e-9) * lot).toFixed(8).replace(/\.?0+$/, '');
   updateOrderModalStats();
 }
 
@@ -846,25 +936,56 @@ function setOrderSizeMax() {
   updateOrderModalStats();
 }
 
+function numberOrNull(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return isFinite(n) ? n : null;
+}
+
 function updateOrderModalStats() {
   if (!_omSignal) return;
   const s = _omSignal;
-  const size = parseInt(document.getElementById('om-size').value) || 1;
+  const face = numberOrNull(s.face_value) || 0.01;   // 1张合约面值（币）
+  const sizeEl = document.getElementById('om-size');
+  const lot = numberOrNull(s.lot_sz) || 1;
+  const minSz = numberOrNull(s.min_sz) || 1;
   const price = s.price;
+  let raw = parseFloat(sizeEl.value);
+  if (!isFinite(raw) || raw < minSz) { raw = minSz; sizeEl.value = minSz; }
+  else {
+    // 按步长 lotSz 向下取整，向上补足到最小张数
+    const snapped = Math.floor(raw / lot + 1e-9) * lot;
+    raw = Math.max(minSz, snapped);
+    sizeEl.value = Number(raw.toFixed(8));
+  }
+  const size = raw;
 
   // 仓位价值
-  const notional = size * 0.01 * price;
+  const notional = size * face * price;
   document.getElementById('om-notional').textContent = notional.toLocaleString('en-US', {maximumFractionDigits:0});
 
-  // 占可用保证金比例
-  const marginPct = _omAvailBal > 0 ? (notional / _omAvailBal * 100).toFixed(1) : '-';
+  // 占可用保证金比例（按所选杠杆）：占用 = 名义 ÷ 倍数
+  const lever = parseFloat(document.getElementById('om-lever').value) || 1;
+  const marginUsed = notional / lever;
+  const marginPct = _omAvailBal > 0 ? (marginUsed / _omAvailBal * 100).toFixed(1) : '-';
   const pctEl = document.getElementById('om-margin-pct');
   pctEl.textContent = marginPct + '%';
   pctEl.style.color = marginPct > 80 ? '#ef5350' : marginPct > 50 ? '#e6b85c' : '#26a69a';
+  // 超出可用保证金可开最大张数 → 提示（OKX 下单会因保证金不足被拒）
+  const maxAffordable = _omAvailBal > 0 ? Math.floor(_omAvailBal * lever / (face * price)) : 0;
+  const omWarn = document.getElementById('om-warn');
+  if (omWarn) {
+    if (maxAffordable > 0 && size > maxAffordable) {
+      omWarn.textContent = `⚠️ 超出可用保证金可开上限，OKX 将拒单；可开上限约 ${maxAffordable} 张（可调高"仓位倍数"）`;
+      omWarn.style.display = '';
+    } else {
+      omWarn.style.display = 'none';
+    }
+  }
 
   // 预计盈亏（用信号原始 SL/TP）
-  const profit = size * 0.01 * Math.abs(s.tp - price);
-  const loss = size * 0.01 * Math.abs(price - s.sl);
+  const profit = size * face * Math.abs(s.tp - price);
+  const loss = size * face * Math.abs(price - s.sl);
   const fee = notional * FEE_RATE * 2;
   const netProfit = profit - fee;
 
@@ -878,7 +999,7 @@ function updateOrderModalStats() {
 async function confirmOrder() {
   if (!_omSignal) return;
   const s = _omSignal;
-  const size = parseInt(document.getElementById('om-size').value) || 1;
+  const size = parseFloat(document.getElementById('om-size').value) || 1;
   closeOrderModal();
 
   setOrderStatus('提交中...');
@@ -891,6 +1012,7 @@ async function confirmOrder() {
         action: s.action, ticker: tickerEl.value,
         price: s.price, sl: s.sl, tp: s.tp,
         size: size,
+        lever: parseFloat(document.getElementById('om-lever').value) || 1,
       }),
     });
     const data = await resp.json().catch(() => ({}));
@@ -906,7 +1028,8 @@ async function confirmOrder() {
       toast('warning', '⚠️ 未连接真实模拟盘（Mock）', `${data.message}\n原因：${reason}`, 8000);
     } else {
       setOrderStatus(`✅ ${data.message}（OKX 订单号 ${data.order_id}）`);
-      toast('success', '✅ 下单成功', `${data.message}\nOKX 订单号：${data.order_id}\n张数：${size}`, 8000);
+      toast('success', data.account_mode === 'real' ? '🔴【实盘】下单成功' : '✅ 下单成功（模拟盘）', `${data.message}\nOKX 订单号：${data.order_id}\n张数：${size}`, 8000);
+      updateAccountModeBadge(data.account_mode || 'simulated');
     }
   } catch (e) {
     setOrderStatus(`❌ 下单出错: ${e.message}`, true);
@@ -986,6 +1109,10 @@ async function openConfig() {
     document.getElementById('cfg-key').value = '';
     document.getElementById('cfg-secret').value = '';
     document.getElementById('cfg-pass').value = '';
+    _accountModeSaved = data.account_mode || 'simulated';
+    _pickedAccountMode = _accountModeSaved;
+    renderAccountModeButtons(_accountModeSaved);
+    updateAccountModeBadge(_accountModeSaved);
     const state = data.configured ? '✅ 已配置凭证' : '⚠️ 未配置凭证';
     setConfigStatus(`${state} · 当前代理 ${data.proxy || '未设置'}`, !data.configured);
   } catch (e) {
@@ -1060,16 +1187,44 @@ function renderOrders(container, orderArr, isPending) {
       ? '<span class="badge buy">买</span>' : '<span class="badge sell">卖</span>';
     const t = o.cTime ? new Date(Number(o.cTime)).toLocaleString('zh-CN', { hour12: false }) : '-';
     const fillPx = isPending ? o.px : o.fillPx || o.avgPx;
+    const cancelCell = isPending
+      ? `<td><button onclick="cancelOrder('${o.instId || _dashTicker || tickerEl.value}', '${o.ordId}')" style="background:#ef5350;color:#fff;border:none;border-radius:4px;padding:3px 10px;font-size:12px;cursor:pointer">撤单</button></td>`
+      : '';
     return `<tr>
       <td>${sideBadge}</td>
       <td class="mono">${fmtNum(o.sz)}</td>
       <td class="mono">${fmtNum(fillPx)}</td>
       <td class="mono">${fmtNum(o.ordId)}</td>
-      <td class="mono">${t}</td>
+      <td class="mono">${t}</td>${cancelCell}
     </tr>`;
   }).join('');
-  const colHead = isPending ? '<th>委托价</th>' : '<th>成交价</th>';
+  const colHead = isPending ? '<th>委托价</th><th style="width:56px">操作</th>' : '<th>成交价</th>';
   container.innerHTML = `<table><thead><tr><th>方向</th><th>数量</th>${colHead}<th>订单号</th><th>时间</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+// ---- 撤销挂单（撤委托） ----
+async function cancelOrder(ticker, ordId) {
+  if (!ticker || !ordId) return;
+  if (!confirm(`确定撤销该笔委托？\n订单号：${ordId}`)) return;
+  try {
+    const resp = await fetch('/api/order/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticker: ticker, ord_id: ordId }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      toast('error', '❌ 撤单失败', data.error || `HTTP ${resp.status}`, 8000);
+    } else if (data.mock) {
+      toast('warning', '⚠️ 撤单（模拟）', data.message, 6000);
+    } else {
+      toast('success', data.account_mode === 'real' ? '🔴【实盘】撤单成功' : '✅ 撤单成功（模拟盘）', data.message, 6000);
+    }
+    // 刷新账户面板中的挂单列表
+    if (typeof accountVisible !== 'undefined' && accountVisible) loadAccount();
+  } catch (e) {
+    toast('error', '❌ 撤单出错', e.message, 8000);
+  }
 }
 
 async function loadAccount() {
@@ -1105,6 +1260,61 @@ async function loadAccount() {
   }
 }
 
+// 切换账户模式（模拟盘/实盘）
+let _pickedAccountMode = null;      // 弹窗内选择但未保存
+let _accountModeSaved = 'simulated';// 服务端当前生效模式
+let _pickedRealConfirm = false;     // 切实盘的确认标记
+
+function renderAccountModeButtons(mode) {
+  const sim = document.getElementById('cfg-mode-sim');
+  const real = document.getElementById('cfg-mode-real');
+  const warn = document.getElementById('cfg-mode-warning');
+  if (!sim || !real) return;
+  sim.style.background = mode === 'simulated' ? '#26a69a' : '#363a45';
+  real.style.background = mode === 'real' ? '#ef5350' : '#363a45';
+  real.style.borderColor = mode === 'real' ? '#ef5350' : 'transparent';
+  if (warn) warn.style.display = mode === 'real' ? '' : 'none';
+}
+
+function updateAccountModeBadge(mode) {
+  const badge = document.getElementById('account-mode-badge');
+  if (!badge) return;
+  badge.dataset.mode = mode;
+  if (mode === 'real') {
+    badge.textContent = '🔴 实盘账户';
+    badge.style.background = '#ef5350';
+    badge.style.color = '#fff';
+  } else {
+    badge.textContent = '🟢 模拟盘';
+    badge.style.background = '#26a69a';
+    badge.style.color = '#fff';
+  }
+  // 下单弹窗里的模式提示（若弹窗在开）
+  const omBanner = document.getElementById('om-mode-banner');
+  if (omBanner) {
+    omBanner.textContent = mode === 'real'
+      ? '🔴 实盘模式：此单直接操作真实资金！'
+      : '🟢 当前为模拟盘账户（不涉及真实资金）';
+    omBanner.style.color = mode === 'real' ? '#ef5350' : '#26a69a';
+  }
+}
+
+function pickAccountMode(mode) {
+  const current = _accountModeSaved;
+  if (mode === 'real' && current === 'simulated' && !_pickedRealConfirm) {
+    if (!confirm('⚠️ 即将切换到【实盘】模式：\n手动下单与自动交易将直接操作【真实资金】！\n\n确认知情并继续？')) {
+      _pickedAccountMode = 'simulated';
+      renderAccountModeButtons('simulated');
+      return;
+    }
+    _pickedRealConfirm = true;
+  }
+  _pickedAccountMode = mode;
+  renderAccountModeButtons(mode);
+}
+
+// （账户模式提交在 saveConfig 内）
+
 async function saveConfig() {
   const payload = {};
   // 只提交用户填写/修改的字段；留空表示不修改该项
@@ -1117,6 +1327,19 @@ async function saveConfig() {
   for (const [key, id] of Object.entries(fields)) {
     const el = document.getElementById(id);
     if (el.value.trim() !== '') payload[key] = el.value.trim();
+  }
+  // 账户模式：有选择变化才提交；切实盘需在浏览器确认一次
+  if (_pickedAccountMode && _pickedAccountMode !== _accountModeSaved) {
+    if (_pickedAccountMode === 'real' && !_pickedRealConfirm) {
+      if (!confirm('⚠️ 保存后进入【实盘】模式，下单将使用真实资金！确认继续？')) {
+        payload.DASH_ACCOUNT_MODE = 'simulated';   // 用户反悔 → 落回模拟
+      } else {
+        _pickedRealConfirm = true;
+        payload.DASH_ACCOUNT_MODE = 'real';
+      }
+    } else {
+      payload.DASH_ACCOUNT_MODE = _pickedAccountMode;
+    }
   }
   if (Object.keys(payload).length === 0) {
     setConfigStatus('没有可保存的改动：请填写至少一项', true);
@@ -1137,8 +1360,12 @@ async function saveConfig() {
       toast('error', '❌ 保存失败', errMsg);
       return;
     }
+    const savedMode = payload.DASH_ACCOUNT_MODE || _accountModeSaved;
+    _accountModeSaved = savedMode;
+    updateAccountModeBadge(savedMode);
+    renderAccountModeButtons(savedMode);
     if (data.client_ok) {
-      setConfigStatus(`✅ 已保存并生效（凭证 ${data.configured ? '完整' : '不完整'}，可正常连接模拟盘）`);
+      setConfigStatus(`✅ 已保存并生效（凭证 ${data.configured ? '完整' : '不完整'}，账户模式：${savedMode === 'real' ? '🔴 实盘' : '🟢 模拟盘'}）`);
       // 保存成功自动关闭弹窗，并在主状态栏显示结果
       closeConfig();
       setStatus(`设置已保存并生效 · 凭证 ${data.configured ? '完整' : '不完整'}`);
@@ -1161,6 +1388,7 @@ async function refreshAll() {
   const volumeEnabled = document.getElementById('volume-on').checked;
   setStatus('加载中...');
   try {
+    await syncParamsFromAutoTrade();   // 自动交易运行中时表盘参数跟随其快照
     const [klines, signals] = await Promise.all([loadKlines(), loadSignals()]);
     if (version !== refreshVersion) return;
     drawKlines(klines);
@@ -1233,7 +1461,71 @@ document.getElementById('poll').addEventListener('change', (e) => {
   }
 });
 
-// 初始加载
+// ---- 参数持久化（localStorage，刷新不丢）----
+const _PARAM_IDS = ['interval', 'limit', 'scan', 'risk-lev', 'volume-on', 'volume-visible', 'poll'];
+const _PARAM_CHECKBOX = new Set(['volume-on', 'volume-visible', 'poll']);
+
+function _readParam(id) {
+  const el = document.getElementById(id);
+  if (!el) return null;
+  return _PARAM_CHECKBOX.has(id) ? el.checked : el.value;
+}
+
+function saveDashboardParams() {
+  const data = {};
+  for (const id of _PARAM_IDS) {
+    const v = _readParam(id);
+    if (v !== null) data[id] = v;
+  }
+  // 趋势弹窗的隐藏控件（trend-on 是隐藏checkbox, trend-period/ma-type 是隐藏input）
+  const trendOn = document.getElementById('trend-on');
+  if (trendOn) data.trendEnabled = trendOn.checked;
+  const tp = document.getElementById('trend-period');
+  if (tp) data.trendPeriod = tp.value;
+  const mt = document.getElementById('ma-type');
+  if (mt) data.maType = mt.value;
+  try { localStorage.setItem('dashParams', JSON.stringify(data)); } catch (e) {}
+}
+
+function restoreDashboardParams() {
+  let data = null;
+  try { data = JSON.parse(localStorage.getItem('dashParams') || 'null'); } catch (e) {}
+  // 确保 trend-on / trend-period / ma-type 隐藏控件存在
+  if (!document.getElementById('trend-on')) {
+    const el = document.createElement('input');
+    el.type = 'checkbox'; el.id = 'trend-on'; el.style.display = 'none';
+    el.checked = data && data.trendEnabled !== undefined ? !!data.trendEnabled : true;
+    document.body.appendChild(el);
+  }
+  if (!document.getElementById('trend-period')) {
+    const el = document.createElement('input');
+    el.type = 'hidden'; el.id = 'trend-period'; el.value = '50';
+    if (data && data.trendPeriod) el.value = data.trendPeriod;
+    document.body.appendChild(el);
+  }
+  if (!document.getElementById('ma-type')) {
+    const el = document.createElement('select');
+    el.id = 'ma-type'; el.style.display = 'none';
+    el.value = (data && data.maType) || 'sma';
+    document.body.appendChild(el);
+  }
+  if (!data) return;
+  for (const [id, val] of Object.entries(data)) {
+    if (id === 'trendEnabled' || id === 'trendPeriod' || id === 'maType') continue;
+    const el = document.getElementById(id);
+    if (!el) continue;
+    if (typeof val === 'boolean') el.checked = val; else el.value = val;
+  }
+}
+
+// 监听所有参数控件，变更即保存
+for (const id of _PARAM_IDS) {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('change', saveDashboardParams);
+}
+
+// 恢复上次参数 → 初始加载
+restoreDashboardParams();
 refreshAll();
 
 // 窗口尺寸变化时重绘
