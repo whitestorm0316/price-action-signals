@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import math
 import os
 import sys
@@ -28,6 +29,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from okx_client import OKXClient
+from logs_utils import get_logger
 from patterns import detect_engulfing, detect_pinbar
 from trend import trend_allows, trend_at
 from volume import volume_ratio_at, volume_signal, should_filter
@@ -36,6 +38,11 @@ from webhook_server.okx_trading import OKXConfigError, OKXTradeError, OKXTrading
 app = Flask(__name__)
 # 模板改动自动重载，避免每次改模板都要重启服务
 app.config["TEMPLATES_AUTO_RELOAD"] = True
+
+# 系统日志：logs/system.log（滚动文件，10MB×5）；
+# werkzeug 的访问日志收敛到同文件（只记 warning 以上，减少噪音）
+log = get_logger("dashboard", console=False, filename="system.log")
+log_hz = get_logger("werkzeug", level=logging.WARNING, console=False, filename="system.log")
 
 # ---------------------------------------------------------------------------
 # .env 配置加载（含敏感凭证），支持 前端设置 -> 自动保存到 .env
@@ -401,6 +408,8 @@ def detect_signals(
     ma_type: str | None = None,
     scan_window: int | None = None,
     volume_enabled: bool = False,
+    candles: list | None = None,
+    rr: float | None = None,
 ) -> list[dict]:
     """拉取 K 线并在最近 N 根上检测信号（可选趋势过滤）。
 
@@ -408,6 +417,9 @@ def detect_signals(
         trend_period: 均线周期，None/0 表示不启用趋势过滤
         ma_type: 均线类型 sma/ema
         scan_window: 扫描最近多少根 K 线；None 用模块级 SIGNAL_SCAN
+        candles: 外部传入的 Candle 列表（回测用，跳过 _fetch_candles_cached；
+            必须为升序，长度 ≥ limit 供大窗口扫描）
+        rr: 盈亏比 (Reward/Risk)，决定目标价距离 = 止损距离 × rr；None 用默认 2.0
 
     返回列表，每个元素:
         {action, price, sl, tp, strategy, ratio, timestamp, result, result_ts}
@@ -415,8 +427,13 @@ def detect_signals(
     tp_ = (trend_period or 0) if trend_period is not None else TREND_PERIOD
     mt_ = ma_type or MA_TYPE
     sw_ = scan_window if scan_window is not None else SIGNAL_SCAN
+    try:
+        rr_ = float(rr) if rr is not None and float(rr) > 0 else 2.0
+    except (TypeError, ValueError):
+        rr_ = 2.0
 
-    candles = _fetch_candles_cached(ticker, interval, limit)
+    if candles is None:
+        candles = _fetch_candles_cached(ticker, interval, limit)
 
     signals: list[dict] = []
     scan = min(sw_, len(candles) - 1)
@@ -424,8 +441,8 @@ def detect_signals(
     for idx in range(len(candles) - scan, len(candles)):
         cur = candles[idx]
         ratio = volume_ratio_at(candles, idx) if volume_enabled else None
-        for pattern in (detect_pinbar(cur, volume_ratio=ratio),
-                        detect_engulfing(candles[idx - 1], cur, volume_ratio=ratio)):
+        for pattern in (detect_pinbar(cur, volume_ratio=ratio, rr=rr_),
+                        detect_engulfing(candles[idx - 1], cur, volume_ratio=ratio, rr=rr_)):
             if pattern is None:
                 continue
             if tp_:
@@ -536,13 +553,16 @@ def api_signals():
     volume_option = request.args.get("volume", "0").lower()
     if volume_option not in {"0", "1", "false", "true"}:
         return jsonify({"error": "volume 必须为 0/1 或 false/true"}), 400
+    # 盈亏比：目标价 = 入场 ± 止损距离 × rr（默认 2.0，可调 0.5~20）
+    rr = request.args.get("rr", 2.0, type=float)
 
     if ticker not in ALLOWED_TICKERS:
         return jsonify({"error": f"暂只支持 {sorted(ALLOWED_TICKERS)}"}), 400
 
     try:
         options = dict(trend_period=trend_period, ma_type=ma_type,
-                       scan_window=scan_window)
+                       scan_window=scan_window,
+                       rr=max(0.5, min(20.0, rr or 2.0)))
         if volume_option in {"1", "true"}:
             options["volume_enabled"] = True
         signals = detect_signals(ticker, interval, limit, **options)
@@ -628,6 +648,11 @@ def api_config_save():
     reset_trade_client()
     # 立即触发一次客户端初始化，尽早暴露凭证/网络问题
     client, cfg_err = get_trade_client()
+    log.info("配置更新 keys=%s 凭证完整=%s 客户端=%s 模式=%s",
+             sorted(updates),
+             all(os.getenv(k) for k in ("OKX_API_KEY", "OKX_API_SECRET", "OKX_PASSPHRASE")),
+             "OK" if client else f"失败:{cfg_err}",
+             account_mode())
     return jsonify(
         {
             "status": "ok",
@@ -765,9 +790,15 @@ def api_order():
             pos_side=pos_side_,
         )
     except OKXTradeError as exc:
+        log.error("手动下单失败 %s %s %s张 @%s: %s", action, ticker, size, p, exc)
         return jsonify({"error": f"OKX 下单失败: {exc}", "mock": False}), 502
     except Exception as exc:  # noqa: BLE001  网络等未知异常
+        log.error("手动下单异常 %s %s: %s", action, ticker, exc)
         return jsonify({"error": f"下单请求异常: {exc}", "mock": False}), 502
+
+    log.info("手动下单 %s %s %s张 @%s 杠杆%s 订单号%s 模式%s",
+             action, ticker, size, p, lever_str or "-",
+             order.get("ordId") or cl_ord_id, account_mode())
 
     return jsonify(
         {
@@ -802,6 +833,7 @@ _auto_trade_config = {
     "trend_filter": True,        # 趋势过滤（默认开）
     "trend_period": 50,          # 均线周期（默认50）
     "ma_type": "sma",            # 均线类型
+    "rr": 2.0,                   # 盈亏比（目标价 = 止损距离 × rr）
 }
 _auto_trade_log: list[dict] = []     # 最近200条自动交易日志
 _auto_trade_positions: dict = {}     # 活跃仓位跟踪 {signal_key: {entry, sl, tp, side, size, time}}
@@ -842,7 +874,7 @@ def _load_auto_trade_state() -> None:
     if isinstance(saved_cfg, dict):
         for k in ("ticker", "interval", "limit", "scan_window", "max_open_trades",
                   "cooldown_seconds", "min_rr_ratio", "max_leverage", "volume_filter",
-                  "trend_filter", "trend_period", "ma_type"):
+                  "trend_filter", "trend_period", "ma_type", "rr"):
             if k in saved_cfg:
                 _auto_trade_config[k] = saved_cfg[k]
     _auto_trade_config["enabled"] = False
@@ -931,6 +963,7 @@ def _auto_trade_scan_and_execute():
                     volume_enabled=cfg["volume_filter"],
                     trend_period=cfg.get("trend_period", 0),
                     ma_type=cfg.get("ma_type", "sma"),
+                    rr=cfg.get("rr") or 2.0,
                 )
                 _meta = get_instrument_meta(ticker)
                 signals = enrich_signals_with_risk(
@@ -1159,7 +1192,7 @@ def _auto_check_pending_orders(client, interval: str):
         if sig_ts and sig_ts < 1e11:            # 兼容旧的秒级数据 → 转毫秒
             sig_ts *= 1000
         expiry_ms = (sig_ts + 2 * bar) if sig_ts else (po.get("placed_at", 0) + 2 * bar / 1000) * 1000
-        if now_ms < expiry:
+        if now_ms < expiry_ms:
             continue  # 还在第 N+1 根K线内，继续等待
         # 到期：查订单状态
         state = None
@@ -1203,7 +1236,7 @@ def _auto_check_pending_orders(client, interval: str):
 
 
 def _auto_log(msg: str, success: bool | None = None):
-    """记录自动交易日志（最多50条）并持久化。"""
+    """记录自动交易日志（最多50条）并持久化；同时写入系统日志文件。"""
     ts = datetime.datetime.now().strftime("%H:%M:%S")
     entry = {"time": ts, "msg": msg, "success": success}
     with _auto_trade_lock:
@@ -1211,6 +1244,7 @@ def _auto_log(msg: str, success: bool | None = None):
         if len(_auto_trade_log) > 200:
             _auto_trade_log.pop(0)
     _save_auto_trade_state()
+    log.info("自动交易 %s", msg)
 
 
 def _start_auto_trade_thread():
@@ -1223,6 +1257,97 @@ def _start_auto_trade_thread():
             name="auto-trade",
         )
         _auto_trade_thread.start()
+
+
+# 回测允许的最大 K 线数（一年 15m≈35040；OKX_MAX_CANDLES 覆盖后可更大）
+BT_MAX_BARS = min(60000, int(os.getenv("OKX_MAX_CANDLES", "60000")))
+
+
+@app.route("/api/backtest", methods=["GET"])
+def api_backtest():
+    """长周期回测：对最近 N 根 K 线上的信号统计 止盈/止损/持仓中 与胜率。
+
+    走磁盘缓存（.cache 目录）：整年数据首次拉取约 1~4 分钟，
+    之后秒出。term 端点保留量取尽后自动切 history-candles 翻页。
+
+    Query:
+        ticker, interval, bars(1..BT_MAX_BARS), trend(0/均线周期), volume(1/0)
+    """
+    t0 = time.time()
+    ticker = request.args.get("ticker", DEFAULT_TICKER).upper()
+    interval = request.args.get("interval", "15m")
+    try:
+        bars = int(request.args.get("bars", 35040))
+    except (TypeError, ValueError):
+        return jsonify({"error": "bars 必须为整数"}), 400
+    bars = min(max(bars, 50), BT_MAX_BARS)
+    try:
+        trend = int(request.args.get("trend", 0) or 0)
+    except (TypeError, ValueError):
+        trend = 0
+    volume_on = request.args.get("volume", "0") in ("1", "true", "on")
+    try:
+        rr = float(request.args.get("rr", 2.0))
+        rr = max(0.5, min(20.0, rr))
+    except (TypeError, ValueError):
+        rr = 2.0
+
+    if ticker not in ALLOWED_TICKERS:
+        return jsonify({"error": f"暂只支持 {sorted(ALLOWED_TICKERS)}"}), 400
+
+    # 拉取：小窗口走常规增量缓存；大窗口走磁盘缓存（回测口径）
+    if bars <= 3000:
+        candles = _fetch_candles_cached(ticker, interval, bars)
+    else:
+        client = OKXClient(
+            proxy=OKX_PROXY,
+            cache_dir=os.path.join(_PROJECT_ROOT, ".cache"),
+        )
+        try:
+            candles = client.get_candles(ticker, bar=interval, limit=bars, use_cache=True)
+        except Exception as exc:  # noqa: BLE001
+            log.error("回测拉取失败 %s %s %d: %s", ticker, interval, bars, exc)
+            return jsonify({"error": f"K 线拉取失败: {exc}"}), 502
+        finally:
+            client.close()
+
+    # 用完整 K 线做检测+结局判定（scan_window = 全部数据）
+    signals = detect_signals(
+        ticker, interval, bars,
+        trend_period=trend, ma_type=MA_TYPE,
+        scan_window=min(bars, len(candles) - 1),
+        volume_enabled=volume_on,
+        candles=candles,
+        rr=rr,
+    )
+
+    stats = {"WIN": 0, "LOSS": 0, "OPEN": 0}
+    for s in signals:
+        stats[s["result"]] = stats.get(s["result"], 0) + 1
+    closed = stats["WIN"] + stats["LOSS"]
+    win_rate = (stats["WIN"] / closed * 100) if closed else 0.0
+
+    span = ((candles[-1].ts - candles[0].ts) / 86_400_000) if len(candles) > 1 else 0.0
+
+    elapsed = round(time.time() - t0, 2)
+    log.info("前端回测 %s %s bars=%d 趋势=%s 量能=%s 信号=%d 胜率%.1f%% 耗时%s s",
+             ticker, interval, bars, trend, volume_on, len(signals), win_rate, elapsed)
+
+    return jsonify({
+        "ticker": ticker,
+        "interval": interval,
+        "bars": len(candles),
+        "span_days": round(span, 1),
+        "total": len(signals),
+        "win": stats["WIN"],
+        "loss": stats["LOSS"],
+        "open": stats["OPEN"],
+        "win_rate": round(win_rate, 1),
+        "with_trend": bool(trend),
+        "with_volume": volume_on,
+        "elapsed_sec": elapsed,
+        "signals": signals[-200:],   # 最近 200 笔明细（避免超大响应）
+    })
 
 
 @app.route("/api/order/cancel", methods=["POST"])
@@ -1259,19 +1384,23 @@ def api_order_cancel():
         result = client.cancel_limit_order(
             inst_id=ticker, ord_id=ord_id or None, cl_ord_id=cl_ord_id or None,
         )
+        cancelled_id = result.get("ordId") or ord_id
+        log.info("撤单成功 %s 订单%s 模式%s", ticker, cancelled_id, account_mode())
         return jsonify({
             "status": "ok",
             "mock": False,
             "account_mode": account_mode(),
             "ticker": ticker,
-            "ord_id": result.get("ordId") or ord_id,
+            "ord_id": cancelled_id,
             "message": f"[{'模拟盘🟢' if account_mode() == 'simulated' else '实盘🔴'}] "
-                       f"撤单成功 {ticker} 订单 {result.get('ordId') or ord_id}",
+                       f"撤单成功 {ticker} 订单 {cancelled_id}",
         })
     except OKXTradeError as exc:
+        log.error("撤单失败 %s 订单%s: %s", ticker, ord_id or cl_ord_id, exc)
         return jsonify({"error": f"撤单失败: {exc}", "mock": False,
                         "account_mode": account_mode()}), 502
     except Exception as exc:  # noqa: BLE001
+        log.error("撤单异常 %s 订单%s: %s", ticker, ord_id or cl_ord_id, exc)
         return jsonify({"error": f"撤单异常: {exc}", "mock": False}), 502
 
 
@@ -1280,11 +1409,11 @@ def api_auto_trade_get():
     """获取自动交易状态和配置。"""
     with _auto_trade_lock:
         cfg = dict(_auto_trade_config)
-        log = list(_auto_trade_log)
+        auto_log_list = list(_auto_trade_log)
         positions = {k: {kk: vv for kk, vv in v.items()} for k, v in _auto_trade_positions.items()}
         history = list(_auto_trade_history)
         pending = list(_auto_pending_orders.values())
-    return jsonify({"config": cfg, "account_mode": account_mode(), "log": log[-60:],
+    return jsonify({"config": cfg, "account_mode": account_mode(), "log": auto_log_list[-60:],
                     "history": history[-50:], "positions": positions, "pending": pending})
 
 
@@ -1326,6 +1455,11 @@ def api_auto_trade_update():
                 pass
         if "volume_filter" in data:
             _auto_trade_config["volume_filter"] = bool(data["volume_filter"])
+        if "rr" in data:
+            try:
+                _auto_trade_config["rr"] = min(20.0, max(0.5, float(data["rr"])))
+            except (TypeError, ValueError):
+                pass
         # 趋势：trend_period>0 即启用
         _auto_trade_config["trend_filter"] = _auto_trade_config["trend_period"] > 0
         _auto_trade_config["enabled"] = True

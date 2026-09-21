@@ -16,9 +16,11 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from okx_client import OKXClient
+from logs_utils import get_logger
 from patterns import detect_engulfing, detect_pinbar
 from signals import pattern_to_signal, print_signal_json, print_signal_pretty
 from trend import trend_allows, trend_at
@@ -37,7 +39,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--limit", type=int, default=300,
-        help="拉取 K 线条数 (默认 300，最多 3000，超过 300 自动分页)",
+        help="拉取 K 线条数 (默认 300，超过 300 自动分页；回测一整年可用 "
+             "如 15m 一年=35040、1H 一年=8760，默认上限 60000，"
+             "可用环境变量 OKX_MAX_CANDLES 调整)",
     )
     parser.add_argument(
         "--pretty", action="store_true",
@@ -49,7 +53,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--proxy", default=None,
-        help="HTTP 代理地址，如 http://127.0.0.1:7890（OKX 被墙时使用）",
+        help="HTTP 代理地址，如 http://127.0.0.1:7890（OKX 被墙时使用）；"
+             "未传时自动读取环境变量 OKX_PROXY",
     )
     parser.add_argument(
         "--host", default=None,
@@ -85,6 +90,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "volume_confirm；放量信号加权、缩量信号减权，并过滤 "
              "'缩量且盈亏比<2' 的信号。默认关闭（量能可选）",
     )
+    parser.add_argument(
+        "--rr", type=float, default=2.0, metavar="RR",
+        help="盈亏比 (Reward/Risk)：目标价 = 入场 ± 止损距离 × 盈亏比，"
+             "默认 2（即 2:1）。例 --rr 3 收窄为3比1，--rr 1.5 更容易止盈但单笔收益小",
+    )
     return parser.parse_args(argv)
 
 
@@ -112,18 +122,29 @@ def _mock_candles(bar: str = "5m") -> list:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    log = get_logger("price-action")
 
     if args.mock:
         candles = _mock_candles()
     else:
+        # CLI --proxy 优先；否则读 OKX_PROXY 环境变量（与仪表盘一致）
+        effective_proxy = args.proxy or os.getenv("OKX_PROXY")
         client = OKXClient(
             timeout=args.timeout,
-            proxy=args.proxy,
+            proxy=effective_proxy,
             host=args.host,
+            cache_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache"),
         )
         try:
-            candles = client.get_candles(args.inst_id, bar=args.bar, limit=args.limit)
+            # 回测使用磁盘缓存（.cache 目录）：同一时段重复回测不再重新拉取
+            use_cache = bool(args.backtest) and not args.mock
+            candles = client.get_candles(
+                args.inst_id, bar=args.bar, limit=args.limit, use_cache=use_cache,
+            )
+            log.info("K线获取 %s %s %d根(backtest=%s cache=%s)",
+                     args.inst_id, args.bar, len(candles), bool(args.backtest), use_cache)
         except RuntimeError as exc:
+            log.error("K线获取失败 %s %s: %s", args.inst_id, args.bar, exc)
             print(f"[错误] {exc}", file=sys.stderr)
             print("提示: 可尝试 --mock 进行离线演示，或参考上方诊断信息调整网络配置。",
                   file=sys.stderr)
@@ -138,7 +159,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.scan:
         return _run_scan(candles, args)
     if args.backtest:
-        return _run_backtest(candles, args)
+        rc = _run_backtest(candles, args)
+        log.info("回测完成 %s %s N=%d rc=%s", args.inst_id, args.bar, args.backtest, rc)
+        return rc
     return _run_latest(candles, args)
 
 
@@ -150,8 +173,8 @@ def _detect_at(candles: list, idx: int, args: argparse.Namespace) -> list:
     ratio = volume_ratio_at(candles, idx) if args.volume else None
     found = []
     for pattern in (
-        detect_pinbar(cur, volume_ratio=ratio),
-        detect_engulfing(prev, cur, volume_ratio=ratio),
+        detect_pinbar(cur, volume_ratio=ratio, rr=args.rr),
+        detect_engulfing(prev, cur, volume_ratio=ratio, rr=args.rr),
     ):
         if pattern is None:
             continue

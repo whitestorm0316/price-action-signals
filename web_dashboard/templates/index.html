@@ -123,6 +123,9 @@
     <label title="最大杠杆倍数：每笔名义仓位 ≤ 余额×倍数÷10笔并发。默认3，可动态调整">
       仓位倍数 <input id="risk-lev" type="number" value="3" min="0.1" max="10" step="0.5" style="width:60px" onchange="refreshAll()" title="决定每笔仓位预算上限（余额×倍数÷最大持仓数）。影响面板建议张数与自动交易快照中的杠杆倍数。">
     </label>
+    <label title="盈亏比：目标价 = 入场价 ± 止损距离 × 盈亏比（默认2，可 0.5~20）">
+      盈亏比 <input id="risk-rr" type="number" value="2" min="0.5" max="20" step="0.5" style="width:56px" onchange="refreshAll()">
+    </label>
     <label title="仅确认或降级价格行为信号；缩量且盈亏比小于2时过滤">
       <input id="volume-on" type="checkbox" checked> 量能确认
     </label>
@@ -131,6 +134,7 @@
     <button class="secondary" onclick="openConfig()">设置</button>
     <span id="account-mode-badge" data-mode="simulated" title="当前交易账户模式（在 设置 中切换）" style="font-size:12px;font-weight:700;padding:4px 10px;border-radius:6px;background:#26a69a;color:#fff;user-select:none">🟢 模拟盘</span>
     <button class="secondary" onclick="openTrendSettings()" title="趋势交易：均线过滤+方向过滤">📈 趋势</button>
+    <button class="secondary" onclick="openBacktest()" title="策略回测：长周期信号胜率统计">🧪 回测</button>
     <button class="secondary" onclick="toggleAccount()" title="查看余额 / 当前仓位 / 下单历史 / 挂单">账户</button>
     <button class="secondary" id="auto-trade-btn" onclick="toggleAutoTrade()" title="自动交易：扫描信号并自动下单">🤖 自动</button>
     <label style="display:flex;align-items:center;gap:4px;" data-page-node-id="6t4MDdmf52yDprbXyYw844">
@@ -179,6 +183,59 @@
         <button class="secondary" onclick="closeConfig()">关闭</button>
         <button onclick="saveConfig()">保存并生效</button>
       </div>
+    </div>
+  </div>
+
+  <!-- 回测面板弹窗：整年历史回测（走本地磁盘缓存） -->
+  <div id="bt-modal" class="modal-overlay" hidden>
+    <div class="modal" style="width:min(620px,95vw);position:relative;">
+    <button class="secondary" onclick="closeBacktest()" title="关闭 (Esc)" style="position:absolute;top:10px;right:10px;width:28px;height:28px;padding:0;font-size:16px;line-height:1;border-radius:6px;">×</button>
+    <h2>🧪 策略回测</h2>
+    <p class="note">对最近 N 根K线上的价格行为信号做事后统计（止盈/止损/持仓中）。整年数据走 OKX history-candles + 本地磁盘缓存：首次约 1~4 分钟，重复回测秒出。结果为理想成交假设，不含滑点与手续费。</p>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+      <label>交易对
+        <select id="bt-ticker" style="padding:5px 8px;background:#1e222d;color:#d1d4dc;border:1px solid #363a45;border-radius:4px">
+          <option>BTC-USDT-SWAP</option><option>ETH-USDT-SWAP</option>
+        </select>
+      </label>
+      <label>周期
+        <select id="bt-interval" style="padding:5px 8px;background:#1e222d;color:#d1d4dc;border:1px solid #363a45;border-radius:4px">
+          <option selected>15m</option><option>5m</option><option>30m</option><option>1H</option><option>4H</option>
+        </select>
+      </label>
+      <label>回测范围
+        <select id="bt-range" style="padding:5px 8px;background:#1e222d;color:#d1d4dc;border:1px solid #363a45;border-radius:4px" onchange="btRangeDaysChanged()">
+          <option value="7">近 7 天</option>
+          <option value="30">近 30 天</option>
+          <option value="90">近 90 天</option>
+          <option value="180">近半年</option>
+          <option value="365" selected>近一年</option>
+        </select>
+      </label>
+      <label title="K线数 = 周期分钟数 × 天数 ÷ 1440，自动换算并覆盖上限">
+        K线数 <input id="bt-bars" type="number" style="width:84px" readonly>
+      </label>
+      <label title="上升趋势只做多、下降趋势只做空"><input id="bt-trend-on" type="checkbox"> 趋势过滤(50)</label>
+      <label title="放量加权/缩量降级，缩量信号过滤"><input id="bt-volume-on" type="checkbox" checked> 量能确认</label>
+      <label title="目标价 = 入场 ± 止损距离 × 盈亏比">盈亏比 <input id="bt-rr" type="number" value="2" min="0.5" max="20" step="0.5" style="width:52px"></label>
+    </div>
+    <div class="modal-actions" style="margin-top:12px">
+      <button id="bt-run" onclick="runBacktest()">开始回测</button>
+    </div>
+    <div id="bt-status" class="note" style="margin-top:6px"></div>
+
+    <div id="bt-result" hidden>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+        <div style="flex:1;background:#1e222d;border-radius:8px;padding:10px;text-align:center"><div style="font-size:22px;font-weight:700" id="bt-total">-</div><div style="font-size:11px;color:#b2b5be">总信号</div></div>
+        <div style="flex:1;background:rgba(38,166,154,.12);border-radius:8px;padding:10px;text-align:center"><div id="bt-win" style="font-size:22px;font-weight:700;color:#26a69a">-</div><div style="font-size:11px;color:#b2b5be">止盈 ✅</div></div>
+        <div style="flex:1;background:rgba(239,83,80,.12);border-radius:8px;padding:10px;text-align:center"><div id="bt-loss" style="font-size:22px;font-weight:700;color:#ef5350">-</div><div style="font-size:11px;color:#b2b5be">止损 ❌</div></div>
+        <div style="flex:1;background:#1e222d;border-radius:8px;padding:10px;text-align:center"><div id="bt-open" style="font-size:22px;font-weight:700;color:#e6b85c">-</div><div style="font-size:11px;color:#b2b5be">持仓中 ⏳</div></div>
+        <div style="flex:1;background:#1e222d;border-radius:8px;padding:10px;text-align:center"><div id="bt-wr" style="font-size:22px;font-weight:700">-</div><div style="font-size:11px;color:#b2b5be">已平仓胜率</div></div>
+      </div>
+      <div id="bt-meta" style="font-size:11px;color:#b2b5be;margin-top:8px"></div>
+      <h3 style="font-size:13px;color:#b2b5be;margin:10px 0 4px;">最近信号明细（最多200笔）</h3>
+      <div id="bt-signals" style="max-height:260px;overflow:auto"></div>
+    </div>
     </div>
   </div>
 
@@ -466,6 +523,10 @@ async function loadSignals() {
   const levEl = document.getElementById('risk-lev');
   const lev = parseFloat(levEl ? levEl.value : '3');
   if (lev > 0 && lev !== 3) params.set('max_lev', String(lev));
+  // 盈亏比（可调）：目标价 = 入场 ± 止损距离 × 盈亏比；默认2不传以减小URL
+  const rrEl = document.getElementById('risk-rr');
+  const rr = parseFloat(rrEl ? rrEl.value : '2');
+  if (isFinite(rr) && rr !== 2) params.set('rr', String(rr));
   // 趋势交易：勾选后启用均线趋势过滤（只顺势交易）
   const trendOnEl = document.getElementById('trend-on');
   const trendOn = trendOnEl ? trendOnEl.checked : true;  // 默认开启
@@ -823,6 +884,7 @@ function gatherDashboardParams() {
     cooldown_seconds: 300,
     min_rr_ratio: 1.5,
     max_leverage: parseFloat(levEl ? levEl.value : '3') || 3,
+    rr: parseFloat(document.getElementById('risk-rr') ? document.getElementById('risk-rr').value : '2') || 2,
   };
 }
 
@@ -1131,6 +1193,87 @@ function toggleAccount() {
   const panel = document.getElementById('account-panel');
   panel.hidden = !accountVisible;
   if (accountVisible) loadAccount();
+}
+
+// ---- 回测面板 ----
+const BAR_MIN = { '1m': 1, '3m': 3, '5m': 5, '15m': 15, '30m': 30, '1H': 60, '4H': 240, '1D': 1440 };
+const BT_MAX_BARS = 60000;
+
+function openBacktest() {
+  document.getElementById('bt-modal').hidden = false;
+  // 交易对默认跟随表盘当前选择
+  const tkSel = document.getElementById('bt-ticker');
+  const curTicker = tickerEl ? tickerEl.value : 'BTC-USDT-SWAP';
+  if ([...tkSel.options].some(o => o.value === curTicker)) tkSel.value = curTicker;
+  // 周期默认跟随当前表盘K线周期
+  const cur = document.getElementById('period') ? document.getElementById('period').value : '15m';
+  const sel = document.getElementById('bt-interval');
+  if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+  btRangeDaysChanged();
+}
+
+function closeBacktest() {
+  document.getElementById('bt-modal').hidden = true;
+}
+
+function btRangeDaysChanged() {
+  const days = parseFloat(document.getElementById('bt-range').value);
+  const barMin = BAR_MIN[document.getElementById('bt-interval').value] || 15;
+  const bars = Math.min(BT_MAX_BARS, Math.round(days * 1440 / barMin));
+  document.getElementById('bt-bars').value = bars;
+}
+// 周期切换也要刷新换算
+document.addEventListener('DOMContentLoaded', () => {
+  const sel = document.getElementById('bt-interval');
+  if (sel) sel.addEventListener('change', btRangeDaysChanged);
+});
+
+async function runBacktest() {
+  const st = document.getElementById('bt-status');
+  const btn = document.getElementById('bt-run');
+  const resultEl = document.getElementById('bt-result');
+  const ticker = document.getElementById('bt-ticker').value || (tickerEl ? tickerEl.value : 'BTC-USDT-SWAP');
+  const interval = document.getElementById('bt-interval').value;
+  const bars = parseInt(document.getElementById('bt-bars').value) || 35040;
+  const trend = document.getElementById('bt-trend-on').checked ? 50 : 0;
+  const volume = document.getElementById('bt-volume-on').checked ? 1 : 0;
+  const rr = parseFloat(document.getElementById('bt-rr').value) || 2;
+  btn.disabled = true; btn.textContent = '回测中...（首次拉取整年数据较慢）';
+  st.textContent = '正在拉取数据并回测，请稍候……（首次约 1~4 分钟，之后走缓存秒出）';
+  try {
+    const resp = await fetch(`/api/backtest?ticker=${ticker}&interval=${interval}&bars=${bars}&trend=${trend}&volume=${volume}&rr=${rr}`);
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      st.textContent = '';
+      st.style.color = '#ef5350';
+      st.textContent = '❌ ' + (data.error || `HTTP ${resp.status}`);
+    } else {
+      resultEl.hidden = false;
+      document.getElementById('bt-total').textContent = data.total;
+      document.getElementById('bt-win').textContent = data.win;
+      document.getElementById('bt-loss').textContent = data.loss;
+      document.getElementById('bt-open').textContent = data.open;
+      document.getElementById('bt-wr').textContent = data.win_rate + '%';
+      document.getElementById('bt-wr').style.color = data.win_rate >= 50 ? '#26a69a' : '#ef5350';
+      document.getElementById('bt-meta').textContent =
+        `${ticker} · ${interval} · ${data.bars}根K线（约${data.span_days}天）` +
+        (data.with_trend ? ' · 含50周期趋势过滤' : '') + (data.with_volume ? ' · 含量能确认' : '') +
+        ` · 耗时 ${data.elapsed_sec}s`;
+      const rows = (data.signals || []).slice(-100).reverse().map(s => {
+        const meta = { WIN: ['✅ 止盈', '#26a69a'], LOSS: ['❌ 止损', '#ef5350'], OPEN: ['⏳ 持仓中', '#e6b85c'] };
+        const [label, color] = meta[s.result] || ['?', ''];
+        const t = new Date(s.timestamp * 1000).toLocaleString('zh-CN', { hour12: false });
+        return `<tr><td class="mono">${t}</td><td>${s.strategy}</td><td>${s.action}</td><td class="mono">${fmtNum(s.price, 2)}</td><td style="color:${color}">${label}</td></tr>`;
+      }).join('');
+      document.getElementById('bt-signals').innerHTML =
+        `<table><thead><tr><th>时间</th><th>形态</th><th>方向</th><th>入场</th><th>结果</th></tr></thead><tbody>${rows || '<tr><td colspan=5>无</td></tr>'}</tbody></table>`;
+      st.textContent = '';
+    }
+  } catch (e) {
+    st.textContent = '❌ 回测出错: ' + e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = '开始回测';
+  }
 }
 
 function closeAccount() {
@@ -1462,7 +1605,7 @@ document.getElementById('poll').addEventListener('change', (e) => {
 });
 
 // ---- 参数持久化（localStorage，刷新不丢）----
-const _PARAM_IDS = ['interval', 'limit', 'scan', 'risk-lev', 'volume-on', 'volume-visible', 'poll'];
+const _PARAM_IDS = ['interval', 'limit', 'scan', 'risk-lev', 'risk-rr', 'volume-on', 'volume-visible', 'poll'];
 const _PARAM_CHECKBOX = new Set(['volume-on', 'volume-visible', 'poll']);
 
 function _readParam(id) {

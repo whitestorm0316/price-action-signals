@@ -35,6 +35,7 @@ def detect_pinbar(
     wick_ratio: float = 2.0,
     close_zone: float = 1 / 3,
     volume_ratio: Optional[float] = None,
+    rr: float = 2.0,
 ) -> Optional[Pattern]:
     """检测看涨/看跌 Pinbar。
 
@@ -49,6 +50,8 @@ def detect_pinbar(
         close_zone: 收盘价须处于的方向区间比例，默认 1/3
         volume_ratio: 当前 K 线的量能比率（可选）。提供时给形态附加
             量能确认标签（放量Pinbar / 缩量Pinbar），作为信号加权/降级依据。
+        rr: 盈亏比 (Reward/Risk) = 目标价距入场 ÷ 止损距入场，默认 2:1。
+            目标价按 entry ± rr*风险 推算。
 
     Returns:
         Pattern 或 None
@@ -70,6 +73,7 @@ def detect_pinbar(
             action="BUY",
             entry=current.close,
             stop=current.low - _tick_buffer(current),  # 影线(下)极值外侧
+            rr=rr,
             volume_confirm=volume_confirm(volume_ratio, "pinbar"),
             volume_ratio=volume_ratio,
         )
@@ -81,6 +85,7 @@ def detect_pinbar(
             action="SELL",
             entry=current.close,
             stop=current.high + _tick_buffer(current),  # 影线(上)极值外侧
+            rr=rr,
             volume_confirm=volume_confirm(volume_ratio, "pinbar"),
             volume_ratio=volume_ratio,
         )
@@ -95,6 +100,7 @@ def detect_engulfing(
     previous: Candle,
     current: Candle,
     volume_ratio: Optional[float] = None,
+    rr: float = 2.0,
 ) -> Optional[Pattern]:
     """检测看涨/看跌吞没。
 
@@ -129,6 +135,7 @@ def detect_engulfing(
             action="BUY",
             entry=current.close,
             stop=min(current.low, previous.low) - _tick_buffer(current),  # 形态(两K线)下极值外侧
+            rr=rr,
             volume_confirm=volume_confirm(volume_ratio, "engulfing"),
             volume_ratio=volume_ratio,
         )
@@ -145,6 +152,7 @@ def detect_engulfing(
             action="SELL",
             entry=current.close,
             stop=max(current.high, previous.high) + _tick_buffer(current),  # 形态(两K线)上极值外侧
+            rr=rr,
             volume_confirm=volume_confirm(volume_ratio, "engulfing"),
             volume_ratio=volume_ratio,
         )
