@@ -30,10 +30,24 @@ if _PROJECT_ROOT not in sys.path:
 
 from okx_client import OKXClient
 from logs_utils import get_logger
-from patterns import detect_engulfing, detect_pinbar
-from trend import trend_allows, trend_at
+from atr import atr_at
+from patterns import build_trend_signal, detect_engulfing, detect_pinbar
+from trend import trend_allows, trend_at, trend_slope_at
 from volume import volume_ratio_at, volume_signal, should_filter
+# 统一策略配置层：预设 / 未验证配置告警 / 同形态最小间隔（见 strategy_config.py）
+from strategy_config import (
+    ENTRY_MODES,
+    SIGNAL_MODES,
+    blocking_reasons,
+    filter_min_gap,
+    pattern_kind,
+    unvalidated_reasons,
+    warning_lines,
+)
 from webhook_server.okx_trading import OKXConfigError, OKXTradeError, OKXTradingClient
+
+#: ATR 计算周期（止损按 N×ATR 定价时使用，见 atr.py）
+ATR_PERIOD = 14
 
 app = Flask(__name__)
 # 模板改动自动重载，避免每次改模板都要重启服务
@@ -183,8 +197,12 @@ CONTRACT_BTC = 0.01   # 兼容引用（默认面值）
 MIN_RISK_REWARD = 1.5       # 最小盈亏比阈值（低于此值不显示）
 MIN_CONTRACTS = 1           # OKX BTC-USDT-SWAP 最小下单量：1张
 
-# OKX 手续费（限价单 Maker 费率，Taker 约0.05%）
-FEE_RATE_MAKER = 0.0002     # 0.02%
+# OKX 手续费率（普通用户）
+#   入场：限价单成交 = 挂单 Maker 0.020%
+#   出场：attachAlgoOrds 的 tpOrdPx/slOrdPx = "-1"（触发后【市价】平仓）= 吃单 Taker 0.050%
+# 因此单笔往返真实费率 = FEE_RATE_MAKER + FEE_RATE_TAKER = 0.070%
+FEE_RATE_MAKER = 0.0002     # 0.02% 挂单
+FEE_RATE_TAKER = 0.0005     # 0.05% 吃单（止损止盈触发后市价平仓走这个）
 
 # 下单类型映射：BUY/SELL -> 小写 side
 ACTION_MAP = {"BUY": "buy", "SELL": "sell"}
@@ -257,6 +275,7 @@ def enrich_signals_with_risk(
     face_value: float | None = None,
     lot: float = 1,
     min_sz: float = 1,
+    require_affordable: bool = True,
 ) -> list[dict]:
     """仓位管理：固定风险比例模型（Fixed Fractional Risk）。
 
@@ -266,7 +285,8 @@ def enrich_signals_with_risk(
         stop_pct       = stop_distance / entry
         notional       = risk_amount / stop_pct      （触及止损恰好亏 risk_amount）
         size           = notional / (entry × face_value)，向下取整到张数精度
-        size < 最小张数 或 盈亏比 < min_ratio → 丢弃信号
+        size < 最小张数 或 盈亏比 < min_ratio → **标记为不可交易**（默认仍保留在结果里）
+        require_affordable=True 时，不可交易的信号被丢弃（下单路径用）
 
     边界：
         - balance ≤ 0 → 不生成任何信号
@@ -275,6 +295,14 @@ def enrich_signals_with_risk(
           把"余额×杠杆"的总风险预算平分给最大持仓数（默认10笔），
           保证配额内的信号可以**同时**开出 max_open_trades 笔，
           不会下 1~2 笔就把可用保证金吃光。
+
+    ⚠️ 为什么要有 ``require_affordable``：
+        账户余额很小时（如 8.36 USDT），BTC 最小 1 张的名义价值就达 760 USDT，
+        所有信号算出的张数都会低于最小张数。若在这里直接丢弃，
+        **信号表格会永远是空的**，用户会以为"策略没信号 / 参数不生效"，
+        而真相是"余额不足以开出最小仓位"。
+        因此**展示路径传 False**（保留信号 + 打 ``affordable=False`` 标记，
+        并在顶部汇总条用醒目提示说明原因），**下单路径保持 True**（绝不建议开不出的仓）。
     """
     face_value = face_value or CONTRACT_BTC
     contracts_step = lot           # OKX lotSz 步长（BTC=1张, ETH=0.01张）
@@ -323,18 +351,28 @@ def enrich_signals_with_risk(
         size = math.floor(size / contracts_step) * contracts_step
         size = round(size, 8)
 
-        # 最小张数过滤
-        if size < min_contracts:
+        # 可开出性判定：张数低于最小张数 = 该仓位**开不出来**（≠ 信号无效）
+        affordable = size >= min_contracts
+        if not affordable and require_affordable:
             continue
 
+        sig["affordable"] = affordable
+        sig["min_contracts"] = min_contracts
         sig["suggested_contracts"] = size
+        # 开不出来时给出"至少要多少余额"的提示，避免用户对着 0 张困惑。
+        # 反推：需要 notional ≥ min_contracts×entry×face_value，
+        # 而 notional 上限 = balance×lev÷trades_cap  ⇒  balance ≥ notional×trades_cap÷lev
+        if not affordable:
+            need_notional = min_contracts * entry * face_value
+            sig["required_balance"] = round(need_notional * trades_cap / lev, 2)
         sig["risk_amount"] = round(size * stop_distance * face_value, 2)  # 本笔实际最大亏损
         sig["risk_amount_plan"] = round(risk_amount, 2)                   # 计划风险金额
         sig["notional"] = round(size * entry * face_value, 2)             # 实际名义仓位
         sig["stop_pct"] = round(stop_pct, 6)
         sig["expected_profit"] = round(size * reward_distance * face_value, 2)
         sig["expected_loss"] = sig["risk_amount"]
-        sig["estimated_fee"] = round(size * entry * face_value * FEE_RATE_MAKER * 2, 2)
+        sig["estimated_fee"] = round(
+            size * entry * face_value * (FEE_RATE_MAKER + FEE_RATE_TAKER), 2)
         sig["position_pct"] = round(rp * 100, 2)
 
         filtered.append(sig)
@@ -400,6 +438,27 @@ def _fetch_candles_cached(ticker: str, interval: str, limit: int) -> list:
 # ---------------------------------------------------------------------------
 # 信号检测（复用阶段一逻辑）
 # ---------------------------------------------------------------------------
+def atr_at(candles: list, idx: int, period: int = 14) -> float | None:
+    """ATR(period)，只用 candles[:idx]（含当前根），无前视偏差。
+
+    TR = max(high-low, |high-prev_close|, |low-prev_close|)，取最近 period 根均值。
+    数据不足返回 None（调用方回退结构止损）。
+    """
+    if idx < period or idx >= len(candles):
+        return None
+    trs = []
+    for j in range(idx - period + 1, idx + 1):
+        c, p = candles[j], candles[j - 1]
+        trs.append(max(c.high - c.low, abs(c.high - p.close), abs(c.low - p.close)))
+    if not trs:
+        return None
+    avg = sum(trs) / len(trs)
+    return avg if avg > 0 else None
+
+
+ATR_PERIOD = 14   # ATR 周期（固定 14，避免又引入一个可调参数造成过拟合）
+
+
 def detect_signals(
     ticker: str,
     interval: str,
@@ -410,6 +469,10 @@ def detect_signals(
     volume_enabled: bool = False,
     candles: list | None = None,
     rr: float | None = None,
+    atr_mult: float | None = None,
+    entry_mode: str | None = None,
+    min_gap: int | None = None,
+    signal_mode: str | None = None,
 ) -> list[dict]:
     """拉取 K 线并在最近 N 根上检测信号（可选趋势过滤）。
 
@@ -420,6 +483,14 @@ def detect_signals(
         candles: 外部传入的 Candle 列表（回测用，跳过 _fetch_candles_cached；
             必须为升序，长度 ≥ limit 供大窗口扫描）
         rr: 盈亏比 (Reward/Risk)，决定目标价距离 = 止损距离 × rr；None 用默认 2.0
+        atr_mult: 止损改用 ATR 倍数（可选）。None/0 = 保持结构止损（默认）。
+        entry_mode: 入场方式。"close"（默认）= 形态收盘价入场，行为不变；
+            "breakout" = 等价格越过形态极值才进场。未知取值回退 "close"。
+        min_gap: 同形态（按 pinbar / engulfing 分类）最小间隔根数。
+            None/0/1 = 不过滤（默认行为不变）。
+        signal_mode: 信号来源。"pattern"（默认）= 形态触发，行为不变；
+            "trend" = 纯趋势模式（不看形态，方向由 MA 斜率决定，止损按 N×ATR）。
+            未知取值回退 "pattern"。
 
     返回列表，每个元素:
         {action, price, sl, tp, strategy, ratio, timestamp, result, result_ts}
@@ -427,22 +498,59 @@ def detect_signals(
     tp_ = (trend_period or 0) if trend_period is not None else TREND_PERIOD
     mt_ = ma_type or MA_TYPE
     sw_ = scan_window if scan_window is not None else SIGNAL_SCAN
+    # 信号来源：未知取值一律回退 pattern（保证既有行为不受影响）
+    sm_ = str(signal_mode or "pattern").strip().lower()
+    if sm_ not in SIGNAL_MODES:
+        sm_ = "pattern"
     try:
         rr_ = float(rr) if rr is not None and float(rr) > 0 else 2.0
     except (TypeError, ValueError):
         rr_ = 2.0
+    try:
+        am_ = float(atr_mult) if atr_mult is not None and float(atr_mult) > 0 else None
+    except (TypeError, ValueError):
+        am_ = None
+    # 入场方式：未知取值一律回退 close（保证既有行为不受影响）
+    em_ = str(entry_mode or "close").strip().lower()
+    if em_ not in ENTRY_MODES:
+        em_ = "close"
+    # 同形态最小间隔：非法/<=1 一律不过滤（默认行为不变）
+    try:
+        gap_ = max(0, int(float(min_gap))) if min_gap is not None else 0
+    except (TypeError, ValueError):
+        gap_ = 0
 
     if candles is None:
         candles = _fetch_candles_cached(ticker, interval, limit)
 
-    signals: list[dict] = []
     scan = min(sw_, len(candles) - 1)
+    # 先收集候选（含时间序 idx），再统一做最小间隔过滤，最后判定结果
+    candidates: list[tuple[int, object, object]] = []   # (idx, pattern, ratio)
     # 从旧到新扫描，保证返回按时间升序
     for idx in range(len(candles) - scan, len(candles)):
         cur = candles[idx]
+        # ATR 仅在需要时计算（省掉默认路径的开销）
+        atr_v = atr_at(candles, idx, ATR_PERIOD) if (am_ or sm_ == "trend") else None
+
+        if sm_ == "trend":
+            # 纯趋势模式：不看形态。方向由 MA 斜率决定，止损按 N×ATR。
+            if not tp_ or not atr_v:
+                continue
+            direction = trend_slope_at(candles, idx, tp_, mt_, atr=atr_v)
+            if direction is None:
+                continue   # 横盘/无趋势：不发信号
+            action = "BUY" if direction == "up" else "SELL"
+            p = build_trend_signal(cur, action, atr_v,
+                                   atr_mult=(am_ or 1.5), rr=rr_)
+            if p is not None:
+                candidates.append((idx, p, None))
+            continue
+
         ratio = volume_ratio_at(candles, idx) if volume_enabled else None
-        for pattern in (detect_pinbar(cur, volume_ratio=ratio, rr=rr_),
-                        detect_engulfing(candles[idx - 1], cur, volume_ratio=ratio, rr=rr_)):
+        for pattern in (detect_pinbar(cur, volume_ratio=ratio, rr=rr_,
+                                      atr=atr_v, atr_mult=am_, entry_mode=em_),
+                        detect_engulfing(candles[idx - 1], cur, volume_ratio=ratio, rr=rr_,
+                                         atr=atr_v, atr_mult=am_, entry_mode=em_)):
             if pattern is None:
                 continue
             if tp_:
@@ -451,27 +559,39 @@ def detect_signals(
                     continue
             if volume_enabled and should_filter(ratio, pattern.risk_reward):
                 continue
-            # 用信号之后的价格走势判定成功/失败/持仓中
-            result, result_ts = evaluate_signal(idx, pattern, candles)
-            signals.append(
-                {
-                    "action": pattern.action,
-                    "price": pattern.entry,
-                    "sl": pattern.stop,
-                    "tp": pattern.take_profit,
-                    "strategy": pattern.name,
-                    "ratio": pattern.risk_reward,
-                    "timestamp": cur.ts // 1000,
-                    "result": result,          # WIN / LOSS / OPEN
-                    "result_ts": result_ts // 1000 if result_ts else None,
-                }
+            candidates.append((idx, pattern, ratio))
+
+    # 同形态最小间隔降频：形态会聚集，后续信号多为"追单"（见 STRATEGY_CONCLUSIONS.md）
+    # gap_ <= 1 时原样返回，既有行为逐字节不变
+    if gap_ > 1:
+        candidates = filter_min_gap(
+            candidates, gap_,
+            kind_of=lambda it: pattern_kind(it[1].name),
+            order_of=lambda it: it[0],
+        )
+
+    signals: list[dict] = []
+    for idx, pattern, ratio in candidates:
+        # 用信号之后的价格走势判定成功/失败/持仓中
+        result, result_ts = evaluate_signal(idx, pattern, candles)
+        sig = {
+            "action": pattern.action,
+            "price": pattern.entry,
+            "sl": pattern.stop,
+            "tp": pattern.take_profit,
+            "strategy": pattern.name,
+            "ratio": pattern.risk_reward,
+            "timestamp": candles[idx].ts // 1000,
+            "result": result,          # WIN / LOSS / OPEN
+            "result_ts": result_ts // 1000 if result_ts else None,
+        }
+        if volume_enabled:
+            sig.update(
+                volume_ratio=ratio,
+                volume_signal=volume_signal(ratio),
+                volume_confirm=pattern.volume_confirm,
             )
-            if volume_enabled:
-                signals[-1].update(
-                    volume_ratio=ratio,
-                    volume_signal=volume_signal(ratio),
-                    volume_confirm=pattern.volume_confirm,
-                )
+        signals.append(sig)
     return signals
 
 
@@ -555,6 +675,22 @@ def api_signals():
         return jsonify({"error": "volume 必须为 0/1 或 false/true"}), 400
     # 盈亏比：目标价 = 入场 ± 止损距离 × rr（默认 2.0，可调 0.5~20）
     rr = request.args.get("rr", 2.0, type=float)
+    # 止损口径：atr=多倍ATR（如 1.5），0/空 = 结构止损（默认）
+    atr_mult = request.args.get("atr", 0, type=float)
+    # 入场方式：entry=close|breakout（默认 close，未知取值回退 close）
+    entry_mode = str(request.args.get("entry", "close") or "close").strip().lower()
+    if entry_mode not in ENTRY_MODES:
+        entry_mode = "close"
+    # 同形态最小间隔：gap=根数（<=1 = 不过滤，默认 0）
+    try:
+        min_gap = int(float(request.args.get("gap", 0) or 0))
+        min_gap = min(200, min_gap) if min_gap > 1 else 0
+    except (TypeError, ValueError):
+        min_gap = 0
+    # 信号来源：mode=pattern|trend（默认 pattern，未知取值回退 pattern）
+    signal_mode = str(request.args.get("mode", "pattern") or "pattern").strip().lower()
+    if signal_mode not in SIGNAL_MODES:
+        signal_mode = "pattern"
 
     if ticker not in ALLOWED_TICKERS:
         return jsonify({"error": f"暂只支持 {sorted(ALLOWED_TICKERS)}"}), 400
@@ -562,7 +698,10 @@ def api_signals():
     try:
         options = dict(trend_period=trend_period, ma_type=ma_type,
                        scan_window=scan_window,
-                       rr=max(0.5, min(20.0, rr or 2.0)))
+                       rr=max(0.5, min(20.0, rr or 2.0)),
+                       atr_mult=(atr_mult if atr_mult and 0 < atr_mult <= 10 else None),
+                       entry_mode=entry_mode, min_gap=min_gap,
+                       signal_mode=signal_mode)
         if volume_option in {"1", "true"}:
             options["volume_enabled"] = True
         signals = detect_signals(ticker, interval, limit, **options)
@@ -584,10 +723,14 @@ def api_signals():
     max_lev = request.args.get("max_lev", type=float)
     max_trades = request.args.get("max_trades", type=int)
     meta = get_instrument_meta(ticker)
+    # 展示路径：require_affordable=False —— 余额不足以开出最小仓位时，
+    # 仍返回信号（带 affordable=False 标记），否则表格会永远为空、
+    # 用户会误以为"策略没信号 / 参数不生效"。真正的下单路径仍会拦掉它们。
     signals = enrich_signals_with_risk(
         signals, balance, risk_pct=risk_pct,
         max_leverage=max_lev, max_open_trades=max_trades,
-        face_value=meta["ctVal"], lot=meta["lotSz"], min_sz=meta["minSz"])
+        face_value=meta["ctVal"], lot=meta["lotSz"], min_sz=meta["minSz"],
+        require_affordable=False)
     for s in signals:
         s["face_value"] = meta["ctVal"]     # 1张 = ctVal 币
         s["lot_sz"] = meta["lotSz"]         # 张数步长
@@ -834,7 +977,13 @@ _auto_trade_config = {
     "trend_period": 50,          # 均线周期（默认50）
     "ma_type": "sma",            # 均线类型
     "rr": 2.0,                   # 盈亏比（目标价 = 止损距离 × rr）
+    "atr_mult": 0,               # 止损口径：0=结构止损（默认）；>0=改用 N×ATR(14)
+    "entry_mode": "close",       # 入场方式：close=形态收盘价（默认）；breakout=突破形态极值
+    "min_gap": 0,                # 同形态最小间隔(根)：0=不过滤（默认）；>1=降频
+    "signal_mode": "pattern",    # 信号来源：pattern=形态触发（默认）；trend=纯趋势（不用形态）
 }
+# 未验证配置的显式确认标记（内存态）：本次"开始自动交易"是否已确认过告警
+_auto_trade_unvalidated_ack = {"acknowledged": False}
 _auto_trade_log: list[dict] = []     # 最近200条自动交易日志
 _auto_trade_positions: dict = {}     # 活跃仓位跟踪 {signal_key: {entry, sl, tp, side, size, time}}
 _auto_trade_history: list[dict] = [] # 已成交订单历史（持久化）
@@ -854,7 +1003,11 @@ _auto_trade_lock = threading.Lock()
 _auto_trade_thread: threading.Thread | None = None
 
 # ---- 自动交易状态持久化（重启不丢）----
-_AUTO_TRADE_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auto_trade_state.json")
+# 路径可用环境变量 PA_AUTO_TRADE_STATE 覆盖：测试/并发实例应指向临时文件，
+# 避免把真实运行状态（配置、成交历史、持仓跟踪）写脏或覆盖。
+_AUTO_TRADE_STATE_FILE = os.environ.get(
+    "PA_AUTO_TRADE_STATE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "auto_trade_state.json"))
 
 
 def _load_auto_trade_state() -> None:
@@ -874,7 +1027,8 @@ def _load_auto_trade_state() -> None:
     if isinstance(saved_cfg, dict):
         for k in ("ticker", "interval", "limit", "scan_window", "max_open_trades",
                   "cooldown_seconds", "min_rr_ratio", "max_leverage", "volume_filter",
-                  "trend_filter", "trend_period", "ma_type", "rr"):
+                  "trend_filter", "trend_period", "ma_type", "rr", "atr_mult",
+                  "entry_mode", "min_gap", "signal_mode"):
             if k in saved_cfg:
                 _auto_trade_config[k] = saved_cfg[k]
     _auto_trade_config["enabled"] = False
@@ -937,6 +1091,10 @@ def _auto_trade_scan_and_execute():
             except Exception as exc:
                 _auto_log(f"挂单检查异常: {exc}", success=False)
 
+            # 对账清理：positions 里的占位超过 冷却时间×2 即失效，
+            # 防止撤单/平仓后残留记录无限累积（污染冷却判断与面板显示）
+            _auto_prune_positions(cfg["cooldown_seconds"] * 2)
+
             # 检查当前持仓数
             try:
                 positions = client.get_positions(ticker)
@@ -953,7 +1111,11 @@ def _auto_trade_scan_and_execute():
             _meta = get_instrument_meta(ticker)   # 币种规格：面值/步长/最小张数
             scan_cfg_msg = (f"{ticker} {cfg['interval']} K线{cfg['limit']} "
                             f"窗口{cfg['scan_window']} 量能{'开' if cfg['volume_filter'] else '关'} "
-                            f"趋势{cfg.get('trend_period', 0) or '关'} 倍数{cfg.get('max_leverage', 3.0)}")
+                            f"趋势{cfg.get('trend_period', 0) or '关'} "
+                            f"入场{cfg.get('entry_mode', 'close')} "
+                            f"来源{cfg.get('signal_mode', 'pattern')} "
+                            f"止损{('ATR×%g' % cfg['atr_mult']) if cfg.get('atr_mult') else '结构'} "
+                            f"间隔{cfg.get('min_gap', 0) or '无'} 倍数{cfg.get('max_leverage', 3.0)}")
             # 扫描信号
             try:
                 balance = get_usdt_balance()
@@ -964,12 +1126,20 @@ def _auto_trade_scan_and_execute():
                     trend_period=cfg.get("trend_period", 0),
                     ma_type=cfg.get("ma_type", "sma"),
                     rr=cfg.get("rr") or 2.0,
+                    atr_mult=cfg.get("atr_mult") or None,
+                    entry_mode=cfg.get("entry_mode") or "close",
+                    min_gap=cfg.get("min_gap") or 0,
+                    signal_mode=cfg.get("signal_mode") or "pattern",
                 )
                 _meta = get_instrument_meta(ticker)
+                # require_affordable=False：**保留**开不出的信号，好在日志里说清
+                # "不是没信号，而是余额开不出最小仓位"。
+                # 下单仍由下面的逐条判定拦截（绝不真的开出开不出的仓）。
                 signals = enrich_signals_with_risk(
                     signals, balance, max_leverage=cfg.get("max_leverage", 3.0),
                     max_open_trades=cfg["max_open_trades"],
-                    face_value=_meta["ctVal"], lot=_meta["lotSz"], min_sz=_meta["minSz"])
+                    face_value=_meta["ctVal"], lot=_meta["lotSz"], min_sz=_meta["minSz"],
+                    require_affordable=False)
             except Exception as exc:
                 _auto_log(f"扫描失败: {exc}")
                 time.sleep(30)
@@ -999,14 +1169,24 @@ def _auto_trade_scan_and_execute():
             latest_count = sum(1 for sig in closed_sigs if sig.get("timestamp", 0) == latest_ts)
 
             # —— 本轮扫描摘要（检测到K线信号必打印）——
+            # 区分两种"看不到东西"：① 真的没有形态 ② 有信号但余额开不出
+            # （②若不区分，会显示成"本轮无信号"，让人误以为策略或参数失效）
             if not signals:
                 _auto_log(f"🔍 扫描 {scan_cfg_msg} → 本轮无信号")
             else:
                 extra = f"，另进行中{len(forming_sigs)}个(不交易)" if forming_sigs else ""
-                _auto_log(f"🔍 扫描 {scan_cfg_msg} → 已收盘信号{len(closed_sigs)}个，"
-                          f"最新收盘K线{latest_count}个{extra}")
+                unaffordable = [s for s in signals if not s.get("affordable", True)]
+                if unaffordable and len(unaffordable) == len(signals):
+                    need = max((s.get("required_balance") or 0) for s in unaffordable)
+                    _auto_log(
+                        f"🔍 扫描 {scan_cfg_msg} → 检测到{len(signals)}个信号，"
+                        f"但余额不足全部开不出（需余额 ≥ {need:.0f} USDT，"
+                        f"当前 {balance:.2f}）{extra}", success=False)
+                else:
+                    _auto_log(f"🔍 扫描 {scan_cfg_msg} → 已收盘信号{len(closed_sigs)}个，"
+                              f"最新收盘K线{latest_count}个{extra}"
+                              + (f"，其中{len(unaffordable)}个余额不足" if unaffordable else ""))
 
-            at_least_one = False
             for sig in closed_sigs:
                 ts = sig.get("timestamp", 0)
                 desc = (f"{sig['action']} {sig['strategy']} @{sig['price']:.1f} "
@@ -1016,8 +1196,12 @@ def _auto_trade_scan_and_execute():
                     _auto_log(f"📄 历史K线信号（不交易）{desc}")
                     continue
                 # —— 以下为最新K线信号，逐个打印判定 ——
-                if sig.get("suggested_contracts", 0) < _meta["minSz"]:
-                    _auto_log(f"⏭️ 最新K线信号 {desc}｜张数不足(<{min_sz_auto}) 不下单")
+                if not sig.get("affordable", True) or sig.get("suggested_contracts", 0) < _meta["minSz"]:
+                    need = sig.get("required_balance")
+                    need_txt = f"，建议余额 ≥ {need:.0f} USDT" if need else ""
+                    _auto_log(f"⏭️ 最新K线信号 {desc}｜资金不足：最小{_meta['minSz']}张"
+                              f"（名义 {_meta['minSz'] * sig['price'] * _meta['ctVal']:.0f} USDT）"
+                              f"超出当前余额可开仓位{need_txt}，不下单", success=False)
                     continue
                 if sig.get("risk_reward_ratio", 0) < cfg["min_rr_ratio"]:
                     _auto_log(f"⏭️ 最新K线信号 {desc}｜盈亏比<{cfg['min_rr_ratio']}，跳过")
@@ -1042,7 +1226,6 @@ def _auto_trade_scan_and_execute():
                         break
                 else:
                     # 没有冷却中的同方向仓位 → 下单
-                    at_least_one = True
                     ok = _execute_auto_trade(sig, ticker, client)
                     if not ok:
                         _auto_failed_sigs[sig_key] = ts   # 本根K线内不再重试该信号
@@ -1059,6 +1242,7 @@ def _auto_trade_scan_and_execute():
 
 def _execute_auto_trade(sig: dict, ticker: str, client):
     """执行单笔自动交易。"""
+    _meta = get_instrument_meta(ticker)   # 币种规格：ctVal / lotSz / minSz
     size = sig["suggested_contracts"]
     entry = sig["price"]
     sl = sig["sl"]
@@ -1174,6 +1358,25 @@ def _execute_auto_trade(sig: dict, ticker: str, client):
         return False
 
 
+def _auto_prune_positions(max_age_seconds: float) -> int:
+    """清理超过 max_age_seconds 的持仓跟踪占位（对账用）。
+
+    `_auto_trade_positions` 只在启动时清理过一次，运行期若不回收，
+    撤单/平仓后的残留会无限累积：冷却判断的遍历集合持续膨胀，
+    面板"活跃仓位"也会显示早已失效的条目。这里按时间兜底回收，
+    返回清理条数（有清理才落盘，避免每轮都写文件）。
+    """
+    now = time.time()
+    with _auto_trade_lock:
+        stale = [k for k, v in _auto_trade_positions.items()
+                 if not isinstance(v, dict) or now - v.get("time", 0) >= max_age_seconds]
+        for k in stale:
+            _auto_trade_positions.pop(k, None)
+    if stale:
+        _save_auto_trade_state()
+    return len(stale)
+
+
 def _auto_check_pending_orders(client, interval: str):
     """挂单有效期检查 = 1 根 K 线。
 
@@ -1208,6 +1411,7 @@ def _auto_check_pending_orders(client, interval: str):
         if state in ("filled", "partially_filled"):
             with _auto_trade_lock:
                 _auto_pending_orders.pop(oid, None)
+                # 已成交 → 保留 positions 跟踪（真正持仓中，靠冷却时间自然过期）
                 for h in reversed(_auto_trade_history):
                     if str(h.get("ord_id")) == oid:
                         h["status"] = "filled"
@@ -1218,6 +1422,10 @@ def _auto_check_pending_orders(client, interval: str):
         elif state in ("canceled",):
             with _auto_trade_lock:
                 _auto_pending_orders.pop(oid, None)
+                # 已撤销 → 从未持仓，必须同时清掉 positions 里的占位，
+                # 否则这个未成交信号会一直占着冷却名额
+                _auto_trade_positions.pop(po.get("sig_key"), None)
+            _save_auto_trade_state()
         else:
             # 未成交 → 撤单，信号作废
             try:
@@ -1228,6 +1436,8 @@ def _auto_check_pending_orders(client, interval: str):
                 continue
             with _auto_trade_lock:
                 _auto_pending_orders.pop(oid, None)
+                # 撤单成功 → 撤销持仓占位（该信号从未真正成交）
+                _auto_trade_positions.pop(po.get("sig_key"), None)
                 for h in reversed(_auto_trade_history):
                     if str(h.get("ord_id")) == oid:
                         h["status"] = "expired"
@@ -1271,7 +1481,8 @@ def api_backtest():
     之后秒出。term 端点保留量取尽后自动切 history-candles 翻页。
 
     Query:
-        ticker, interval, bars(1..BT_MAX_BARS), trend(0/均线周期), volume(1/0)
+        ticker, interval, bars(1..BT_MAX_BARS), trend(0/均线周期), volume(1/0),
+        rr, atr(ATR倍数), entry(close|breakout), gap(同形态最小间隔根数)
     """
     t0 = time.time()
     ticker = request.args.get("ticker", DEFAULT_TICKER).upper()
@@ -1291,6 +1502,24 @@ def api_backtest():
         rr = max(0.5, min(20.0, rr))
     except (TypeError, ValueError):
         rr = 2.0
+    try:
+        atr_mult = float(request.args.get("atr", 0) or 0)
+        atr_mult = atr_mult if 0 < atr_mult <= 10 else None   # 0/超界 = 用结构止损
+    except (TypeError, ValueError):
+        atr_mult = None
+    # 入场方式（未知取值回退 close）与同形态最小间隔（<=1 = 不过滤）
+    entry_mode = str(request.args.get("entry", "close") or "close").strip().lower()
+    if entry_mode not in ENTRY_MODES:
+        entry_mode = "close"
+    try:
+        min_gap = int(float(request.args.get("gap", 0) or 0))
+        min_gap = min(200, min_gap) if min_gap > 1 else 0
+    except (TypeError, ValueError):
+        min_gap = 0
+    # 信号来源：mode=pattern|trend（默认 pattern，未知取值回退 pattern）
+    signal_mode = str(request.args.get("mode", "pattern") or "pattern").strip().lower()
+    if signal_mode not in SIGNAL_MODES:
+        signal_mode = "pattern"
 
     if ticker not in ALLOWED_TICKERS:
         return jsonify({"error": f"暂只支持 {sorted(ALLOWED_TICKERS)}"}), 400
@@ -1319,6 +1548,10 @@ def api_backtest():
         volume_enabled=volume_on,
         candles=candles,
         rr=rr,
+        atr_mult=atr_mult,
+        entry_mode=entry_mode,
+        min_gap=min_gap,
+        signal_mode=signal_mode,
     )
 
     stats = {"WIN": 0, "LOSS": 0, "OPEN": 0}
@@ -1330,8 +1563,9 @@ def api_backtest():
     span = ((candles[-1].ts - candles[0].ts) / 86_400_000) if len(candles) > 1 else 0.0
 
     elapsed = round(time.time() - t0, 2)
-    log.info("前端回测 %s %s bars=%d 趋势=%s 量能=%s 信号=%d 胜率%.1f%% 耗时%s s",
-             ticker, interval, bars, trend, volume_on, len(signals), win_rate, elapsed)
+    log.info("前端回测 %s %s bars=%d 趋势=%s 量能=%s rr=%s atr=%s 入场=%s 间隔=%s 来源=%s 信号=%d 胜率%.1f%% 耗时%s s",
+             ticker, interval, bars, trend, volume_on, rr, atr_mult,
+             entry_mode, min_gap, signal_mode, len(signals), win_rate, elapsed)
 
     return jsonify({
         "ticker": ticker,
@@ -1345,6 +1579,11 @@ def api_backtest():
         "win_rate": round(win_rate, 1),
         "with_trend": bool(trend),
         "with_volume": volume_on,
+        "rr": rr,
+        "atr_mult": atr_mult,
+        "entry_mode": entry_mode,
+        "min_gap": min_gap,
+        "signal_mode": signal_mode,
         "elapsed_sec": elapsed,
         "signals": signals[-200:],   # 最近 200 笔明细（避免超大响应）
     })
@@ -1414,7 +1653,12 @@ def api_auto_trade_get():
         history = list(_auto_trade_history)
         pending = list(_auto_pending_orders.values())
     return jsonify({"config": cfg, "account_mode": account_mode(), "log": auto_log_list[-60:],
-                    "history": history[-50:], "positions": positions, "pending": pending})
+                    "history": history[-50:], "positions": positions, "pending": pending,
+                    # 未验证配置提示：UI 据此显示告警横幅（blocking = 启动前需确认）
+                    "unvalidated": bool(unvalidated_reasons(cfg)),
+                    "blocking": blocking_reasons(cfg),
+                    "notice": unvalidated_reasons(cfg),
+                    "warning": warning_lines(cfg)})
 
 
 @app.route("/api/auto-trade", methods=["POST"])
@@ -1424,6 +1668,12 @@ def api_auto_trade_update():
     前端把表盘当前参数整包传过来：
     ticker / interval / limit / scan_window / volume_filter /
     trend_period(0=关) / ma_type / max_open_trades / cooldown_seconds / min_rr_ratio
+    / entry_mode(close|breakout) / min_gap / atr_mult / signal_mode(pattern|trend)
+
+    安全闸门：若参数命中"阻断类未验证特征"（breakout 入场 / candidate 或 trend_wide
+    预设 / atr_mult>0 / signal_mode=trend），
+    必须同时传 ``confirm_unvalidated: true`` 才会启动；否则返回 409 并附告警文本。
+    仅关闭趋势过滤属"提示类"，不阻断，只在告警横幅中提示。
     """
     data = request.get_json(silent=True) or {}
     with _auto_trade_lock:
@@ -1460,16 +1710,64 @@ def api_auto_trade_update():
                 _auto_trade_config["rr"] = min(20.0, max(0.5, float(data["rr"])))
             except (TypeError, ValueError):
                 pass
+        if "atr_mult" in data:
+            try:
+                v = float(data["atr_mult"])
+                # 0/负数 → 结构止损；上限 10×ATR 防止止损宽到不合理
+                _auto_trade_config["atr_mult"] = v if 0 < v <= 10 else 0
+            except (TypeError, ValueError):
+                pass
+        # 入场方式：未知取值回退 close（不改行为）
+        if "entry_mode" in data:
+            em = str(data["entry_mode"] or "close").strip().lower()
+            _auto_trade_config["entry_mode"] = em if em in ENTRY_MODES else "close"
+        # 同形态最小间隔：0/1 = 不过滤；上限 200 根防误设
+        if "min_gap" in data:
+            try:
+                g = int(float(data["min_gap"]))
+                _auto_trade_config["min_gap"] = min(200, g) if g > 1 else 0
+            except (TypeError, ValueError):
+                pass
+        # 信号来源：未知取值回退 pattern（不改行为）
+        if "signal_mode" in data:
+            sm = str(data["signal_mode"] or "pattern").strip().lower()
+            _auto_trade_config["signal_mode"] = sm if sm in SIGNAL_MODES else "pattern"
         # 趋势：trend_period>0 即启用
         _auto_trade_config["trend_filter"] = _auto_trade_config["trend_period"] > 0
-        _auto_trade_config["enabled"] = True
+
+        # ---- 安全闸门：未验证配置必须显式确认 ----
+        # 阻断类（breakout 入场 / candidate 预设）需确认；仅关闭趋势过滤只提示不阻断
         cfg = dict(_auto_trade_config)
+        reasons = blocking_reasons(cfg)
+        if reasons and not bool(data.get("confirm_unvalidated")):
+            return jsonify({
+                "status": "needs_confirmation",
+                "message": "该参数组合未经独立验证，需显式确认后才能启动自动交易",
+                "reasons": reasons,
+                "notice": unvalidated_reasons(cfg),
+                "warning": warning_lines(cfg),
+                "config": cfg,
+            }), 409
+
+        _auto_trade_config["enabled"] = True
+        _auto_trade_unvalidated_ack["acknowledged"] = bool(reasons)
 
     _start_auto_trade_thread()
+    _save_auto_trade_state()
+    # 未验证配置：启动时把告警写进日志面板（醒目、可追溯）
+    for line in warning_lines(cfg):
+        _auto_log(line, success=False)
     _auto_log(f"🚀 自动交易开始：{cfg['ticker']} {cfg['interval']} "
               f"量能:{'开' if cfg['volume_filter'] else '关'} "
-              f"趋势:{cfg['trend_period'] or '关'}")
-    return jsonify({"status": "ok", "config": cfg})
+              f"趋势:{cfg['trend_period'] or '关'} "
+              f"入场:{cfg.get('entry_mode', 'close')} "
+              f"来源:{cfg.get('signal_mode', 'pattern')} "
+              f"止损:{('ATR×%g' % cfg['atr_mult']) if cfg.get('atr_mult') else '结构'} "
+              f"间隔:{cfg.get('min_gap', 0) or '无'}")
+    return jsonify({"status": "ok", "config": cfg,
+                    "unvalidated": bool(unvalidated_reasons(cfg)),
+                    "blocking": blocking_reasons(cfg),
+                    "warning": warning_lines(cfg)})
 
 
 @app.route("/api/auto-trade/stop", methods=["POST"])
@@ -1477,6 +1775,8 @@ def api_auto_trade_stop():
     """停止自动交易。"""
     with _auto_trade_lock:
         _auto_trade_config["enabled"] = False
+        # 停止后清空确认标记：下次启动若仍是未验证配置，需重新确认
+        _auto_trade_unvalidated_ack["acknowledged"] = False
     _save_auto_trade_state()
     return jsonify({"status": "ok", "message": "自动交易已停止"})
 

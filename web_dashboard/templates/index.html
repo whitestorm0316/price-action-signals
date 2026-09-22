@@ -54,6 +54,13 @@
   .badge.sell { background: rgba(239,83,80,.18); color: #ef5350; }
   .mono { font-variant-numeric: tabular-nums; }
   .empty { color: #787b86; text-align: center; padding: 20px; }
+  /* 余额闸门提示条：说明"信号存在但开不出仓" */
+  .gate-banner { border:1px solid rgba(230,184,92,.5); background:rgba(230,184,92,.10);
+                 color:#e6b85c; border-radius:8px; padding:10px 14px; margin-bottom:12px;
+                 font-size:12.5px; line-height:1.75; }
+  .gate-banner b { color:#f0c96b; }
+  .gate-banner code { background:rgba(255,255,255,.08); padding:1px 5px; border-radius:3px;
+                      font-variant-numeric:tabular-nums; }
   .err { color: #ef5350; font-size: 13px; padding: 8px 0; }
   .ok { color: #26a69a; font-size: 13px; }
   /* 结果徽章 */
@@ -126,6 +133,35 @@
     <label title="盈亏比：目标价 = 入场价 ± 止损距离 × 盈亏比（默认2，可 0.5~20）">
       盈亏比 <input id="risk-rr" type="number" value="2" min="0.5" max="20" step="0.5" style="width:56px" onchange="refreshAll()">
     </label>
+    <label title="止损口径：0 = 结构止损（形态极值外侧，默认）；>0 = 改用 N×ATR(14)。实测止损越宽，手续费占比越低"><span style="color:#b2b5be">止损</span>
+      <select id="risk-atr" onchange="refreshAll()" style="width:88px">
+        <option value="0">结构止损</option>
+        <option value="1">1×ATR</option>
+        <option value="1.5">1.5×ATR</option>
+        <option value="2">2×ATR</option>
+        <option value="2.5">2.5×ATR</option>
+        <option value="3">3×ATR</option>
+        <option value="4">4×ATR</option>
+        <option value="5">5×ATR</option>
+      </select>
+    </label>
+    <label title="入场方式：close = 形态收盘价入场（默认，原有行为）；breakout = 等价格越过形态极值才进场（复盘显示可过滤假信号，但**实盘需要触发单**，当前自动交易仅支持限价单）">
+      <span style="color:#b2b5be">入场</span>
+      <select id="risk-entry" onchange="refreshAll()" style="width:96px">
+        <option value="close">收盘价</option>
+        <option value="breakout">突破极值 ⚠️</option>
+      </select>
+    </label>
+    <label title="同形态最小间隔（根）：形态会聚集出现、后续信号多为追单，间隔过滤可降频。0/1 = 不过滤（默认）。复盘中最优约 8~40">
+      间隔 <input id="risk-gap" type="number" value="0" min="0" max="200" step="1" style="width:56px" onchange="refreshAll()">
+    </label>
+    <label title="信号来源：pattern = 检测 Pinbar/吞没形态触发（默认，原有行为）；trend = 纯趋势，只看均线斜率决定方向、完全不使用形态（第八轮对照实验的落地，**未通过独立验证**）">
+      <span style="color:#b2b5be">来源</span>
+      <select id="risk-signal-mode" onchange="refreshAll()" style="width:96px">
+        <option value="pattern">形态</option>
+        <option value="trend">纯趋势 ⚠️</option>
+      </select>
+    </label>
     <label title="仅确认或降级价格行为信号；缩量且盈亏比小于2时过滤">
       <input id="volume-on" type="checkbox" checked> 量能确认
     </label>
@@ -150,6 +186,7 @@
 
   <div class="table-wrap" data-page-node-id="l3ssCgcRwgw6EU1nFglaxv">
     <h2 data-page-node-id="BLU0CoIjE4jGAEvurEvABq">最近信号</h2>
+    <div id="balance-gate" class="gate-banner" hidden></div>
     <div id="signal-summary" class="summary" aria-live="polite"></div>
     <div id="summary-note" class="note">🚧 = 进行中K线的信号（未收盘，形态可能重绘消失，自动交易**只交易已收盘K线**的信号）。
 汇总当前扫描窗口内、过滤后保留的信号。胜率 = 成功 /（成功 + 失败），不含持仓中；未计手续费与滑点。</div>
@@ -218,6 +255,25 @@
       <label title="上升趋势只做多、下降趋势只做空"><input id="bt-trend-on" type="checkbox"> 趋势过滤(50)</label>
       <label title="放量加权/缩量降级，缩量信号过滤"><input id="bt-volume-on" type="checkbox" checked> 量能确认</label>
       <label title="目标价 = 入场 ± 止损距离 × 盈亏比">盈亏比 <input id="bt-rr" type="number" value="2" min="0.5" max="20" step="0.5" style="width:52px"></label>
+      <label title="0=结构止损（形态极值外侧，当前实盘口径）；>0=N×ATR(14)">止损 <select id="bt-atr" style="width:96px">
+        <option value="0">结构止损</option>
+        <option value="1">1×ATR</option>
+        <option value="1.5">1.5×ATR</option>
+        <option value="2">2×ATR</option>
+        <option value="2.5">2.5×ATR</option>
+        <option value="3">3×ATR</option>
+        <option value="4">4×ATR</option>
+        <option value="5">5×ATR</option>
+      </select></label>
+      <label title="入场方式：close = 形态收盘价（默认）；breakout = 等价格越过形态极值才进场">入场 <select id="bt-entry" style="width:100px">
+        <option value="close">收盘价</option>
+        <option value="breakout">突破极值</option>
+      </select></label>
+      <label title="同形态最小间隔（根）：0/1 = 不过滤（默认）">间隔 <input id="bt-gap" type="number" value="0" min="0" max="200" step="1" style="width:56px"></label>
+      <label title="信号来源：形态 = 检测 Pinbar/吞没（默认）；纯趋势 = 只看均线斜率、不使用形态（需配合下方趋势周期）">来源 <select id="bt-mode" style="width:100px">
+        <option value="pattern">形态</option>
+        <option value="trend">纯趋势</option>
+      </select></label>
     </div>
     <div class="modal-actions" style="margin-top:12px">
       <button id="bt-run" onclick="runBacktest()">开始回测</button>
@@ -267,8 +323,19 @@
   <div id="auto-trade-modal" class="modal-overlay" hidden>
     <div class="modal" style="width:min(480px,95vw)">
       <h2>🤖 自动交易</h2>
-      <p class="note">开始后复用表盘当前参数（交易对 / 周期 / K线数 / 扫描窗口 / 量能 / 趋势）。运行中参数锁定不可修改，只能暂停；重新开始会采用当时的表盘参数。</p>
+      <p class="note">开始后复用表盘当前参数（交易对 / 周期 / K线数 / 扫描窗口 / 量能 / 趋势 / 入场方式 / 最小间隔）。运行中参数锁定不可修改，只能暂停；重新开始会采用当时的表盘参数。</p>
       <div id="at-status" class="note" style="margin:8px 0;">⏸️ 已暂停</div>
+
+      <!-- 未验证配置告警：参数命中"未通过独立验证"的特征时显示 -->
+      <div id="at-warning" hidden
+           style="margin:10px 0;padding:10px;border-radius:6px;background:rgba(239,83,80,.12);border:1px solid #ef5350;font-size:12px;line-height:1.6;color:#ffb4b0;">
+        <div style="font-weight:700;color:#ef5350;margin-bottom:6px;">⚠️ 未经独立验证的策略参数</div>
+        <div id="at-warning-reasons"></div>
+        <label style="display:flex;align-items:flex-start;gap:6px;margin-top:8px;cursor:pointer;color:#d1d4dc;">
+          <input id="at-confirm" type="checkbox" style="margin-top:2px;">
+          <span>我已了解该配置<b>未通过独立验证</b>（净期望统计不显著、计入滑点与资金费后进一步衰减），<br>并自行承担真金风险，仍要启动自动交易。</span>
+        </label>
+      </div>
 
       <div style="margin:12px 0;">
         <div style="font-size:13px;color:#b2b5be;margin-bottom:4px;">运行参数（快照）</div>
@@ -527,6 +594,10 @@ async function loadSignals() {
   const rrEl = document.getElementById('risk-rr');
   const rr = parseFloat(rrEl ? rrEl.value : '2');
   if (isFinite(rr) && rr !== 2) params.set('rr', String(rr));
+  // 止损口径：0=结构止损（默认，不传）；>0 = N×ATR(14)
+  const atrEl = document.getElementById('risk-atr');
+  const atr = parseFloat(atrEl ? atrEl.value : '0');
+  if (isFinite(atr) && atr > 0) params.set('atr', String(atr));
   // 趋势交易：勾选后启用均线趋势过滤（只顺势交易）
   const trendOnEl = document.getElementById('trend-on');
   const trendOn = trendOnEl ? trendOnEl.checked : true;  // 默认开启
@@ -536,6 +607,18 @@ async function loadSignals() {
     params.set('trend', trendPeriodEl ? trendPeriodEl.value : '50');
     params.set('ma_type', maTypeEl ? maTypeEl.value : 'sma');
   }
+  // 入场方式：close（默认，不传）；breakout = 突破形态极值
+  const entryEl = document.getElementById('risk-entry');
+  const entry = entryEl ? entryEl.value : 'close';
+  if (entry && entry !== 'close') params.set('entry', entry);
+  // 同形态最小间隔：0/1（默认，不传）；>1 = 过滤追单
+  const gapEl = document.getElementById('risk-gap');
+  const gap = gapEl ? parseInt(gapEl.value) : 0;
+  if (isFinite(gap) && gap > 1) params.set('gap', String(gap));
+  // 信号来源：pattern（默认，不传）；trend = 纯趋势（不使用形态）
+  const smEl = document.getElementById('risk-signal-mode');
+  const sm = smEl ? smEl.value : 'pattern';
+  if (sm && sm !== 'pattern') params.set('mode', sm);
   const resp = await fetch('/api/signals?' + params.toString());
   if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error || resp.statusText); }
   return await resp.json();
@@ -614,6 +697,39 @@ function volumeLabel(s) {
   return (s.volume_confirm || '中性量能') + ' · ' + Number(s.volume_ratio).toFixed(2) + '×';
 }
 
+// 余额闸门提示：信号存在、但余额开不出最小仓位时，把原因直接摆在表格上方。
+// 否则用户会以为"策略没信号 / 参数选了不生效"，而真相是"钱不够开最小仓"。
+function renderBalanceGate() {
+  const box = document.getElementById('balance-gate');
+  if (!box) return;
+  const total = currentSignals.length;
+  const affordable = currentSignals.filter(s => s.affordable).length;
+  if (!total || affordable > 0) { box.hidden = true; return; }
+
+  // 全部开不出仓：用第一条反推所需余额（同一交易对下该值随止损宽度变化，取最大最保守）
+  const needs = currentSignals.map(s => s.required_balance).filter(v => v > 0);
+  const needTxt = needs.length
+    ? Math.max(...needs).toLocaleString('en-US', { maximumFractionDigits: 0 })
+    : '—';
+  const st = currentSignals[0] || {};
+  const minQty = st.min_contracts != null ? st.min_contracts : st.min_sz;
+  // 最小下单的名义价值 = 价格 × 1张面值 × 最小张数
+  // ⚠️ 注意 minSz 可能 < 1（BTC minSz=0.01 张），此处不可用"1 张"代指最小下单
+  const minNotional = (st.price && st.face_value && minQty)
+    ? st.price * st.face_value * minQty : 0;
+  const perTradeBudget = _omAvailBal > 0 ? _omAvailBal * 3 / 10 : 0;
+
+  box.hidden = false;
+  box.innerHTML =
+    `⚠️ <b>检测到 ${total} 个信号，但当前余额开不出任何仓位</b>（已全部列出，仅标记为不可下单）<br>` +
+    `· 可用余额 <code>${_omAvailBal > 0 ? _omAvailBal.toFixed(2) : '未知'}</code> USDT；` +
+    `按 <code>余额×杠杆3÷10笔</code> 分摊后每笔预算 <code>${perTradeBudget.toFixed(2)}</code> USDT<br>` +
+    `· ${escapeHtml(st.ticker || '')} 最小下单 <code>${minQty}</code> 张 ≈ ` +
+    `<code>${minNotional.toLocaleString('en-US', { maximumFractionDigits: 2 })}</code> USDT 名义价值（大于每笔预算）<br>` +
+    `· 按当前参数，约需余额 <code>≥ ${needTxt}</code> USDT 才能开出最小仓位<br>` +
+    `<span style="opacity:.8">→ 换更小面值的品种 / 提高杠杆 / 增加余额；参数本身已生效（信号数随参数变化）</span>`;
+}
+
 function renderSummary(volumeEnabled) {
   const count = (key, value) => currentSignals.filter(s => s[key] === value).length;
   const win = count('result', 'WIN'), loss = count('result', 'LOSS');
@@ -632,8 +748,12 @@ function renderSummary(volumeEnabled) {
   const maxNotional = _omAvailBal > 0 ? _omAvailBal * 3 : 0;
   const totalNotional = currentSignals.reduce((a, s) => a + (s.notional || 0), 0);
   const overCap = maxNotional > 0 && totalNotional > maxNotional;
+  const canBuy = currentSignals.filter(s => s.affordable !== false && (s.suggested_contracts || 0) > 0).length;
   const metrics = [
     ['信号总数', currentSignals.length, `买入 ${count('action','BUY')} / 卖出 ${count('action','SELL')} · 过滤后（盈亏比≥1.5）`],
+    ['可下单信号', `${canBuy} / ${currentSignals.length}`, canBuy
+      ? `余额可开出 ${canBuy} 笔；其余${currentSignals.length - canBuy}笔余额不足`
+      : '⚠️ 全部余额不足，开不出最小仓位（见上方提示）'],
     ['仓位管理', `单笔风险 ${riskPct}%（固定风险比例）`, `止损触及亏损=余额×${riskPct}% · 每笔名义仓位≤余额×3÷10笔`],
     ['平均盈亏比', avgRR, `最高 ${currentSignals.reduce((m,s)=>Math.max(m,s.risk_reward_ratio||0),0).toFixed(2)}`],
     ['建议总张数', `${totalContracts.toLocaleString()} 张`, `名义仓位合计 ${totalNotional.toLocaleString('en-US',{maximumFractionDigits:0})} USDT${overCap ? '（⚠️超3倍上限，会被截断）' : ''}`],
@@ -652,7 +772,8 @@ function renderSummary(volumeEnabled) {
 function renderSignalsTable() {
   const wrap = document.getElementById('signals-table');
   if (!currentSignals.length) {
-    wrap.innerHTML = '<div class="empty">暂无信号（可能盈亏比不足或仓位不足）</div>';
+    wrap.innerHTML = '<div class="empty">暂无信号（可能盈亏比不足，或该周期该扫描窗口内无形态）</div>';
+    renderBalanceGate();
     return;
   }
   const fmt = (v) => (v == null ? '-' : Number(v).toFixed(2));
@@ -664,9 +785,13 @@ function renderSignalsTable() {
     // 盈亏比颜色：≥2绿色 / ≥1.5黄色 / <1.5红色（后者理论上已被过滤，但防御性显示）
     const rr = s.risk_reward_ratio || 0;
     const rrCls = rr >= 2 ? 'win' : rr >= 1.5 ? 'open' : 'loss';
-    // 建议张数是否可下单
-    const canOrder = s.suggested_contracts > 0;
+    // 建议张数是否可下单（affordable=false 表示余额开不出最小仓位，而非信号无效）
+    const canOrder = s.suggested_contracts > 0 && s.affordable !== false;
     const forming = s.forming ? ' 🚧' : '';
+    const unaffordable = s.affordable === false;
+    const needTip = unaffordable && s.required_balance
+      ? `余额不足：最小 ${fmtInt(s.min_contracts)} 张，约需余额 ≥ ${Number(s.required_balance).toFixed(0)} USDT`
+      : '';
     return `
     <tr${selected} data-idx="${i}" title="${s.forming ? '进行中K线信号（未收盘，可能重绘消失，自动交易不交易）' : '点击在图上显示该信号'}">
       <td><span class="badge ${s.action === 'BUY' ? 'buy' : 'sell'}">${s.action}</span></td>
@@ -675,7 +800,7 @@ function renderSignalsTable() {
       <td class="mono">${fmt(s.sl)}</td>
       <td class="mono">${fmt(s.tp)}</td>
       <td><span class="badge ${rrCls}">${fmt(rr)}</span></td>
-      <td class="mono">${fmtInt(s.suggested_contracts)} 张</td>
+      <td class="mono">${fmtInt(s.suggested_contracts)} 张${unaffordable ? ' <span class="badge loss" style="font-size:10px">开不出</span>' : ''}</td>
       <td class="mono green">+${fmt(s.expected_profit)}</td>
       <td class="mono red">-${fmt(s.expected_loss)}</td>
       <td class="mono" style="color:#b2b5be">-${fmt(s.estimated_fee)}</td>
@@ -684,7 +809,7 @@ function renderSignalsTable() {
       <td>
         ${canOrder
           ? `<button class="order-btn" data-idx="${i}">下单 ${fmtInt(s.suggested_contracts)}张</button>`
-          : '<span class="note" style="font-size:11px">仓位不足</span>'}
+          : `<span class="note" style="font-size:11px" title="${needTip}">${unaffordable ? '余额不足' : '仓位不足'}</span>`}
       </td>
     </tr>`;
   }).join('');
@@ -696,6 +821,7 @@ function renderSignalsTable() {
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
+  renderBalanceGate();
 }
 
 // 选中某个信号并在图上显示它的入场/止损/止盈
@@ -855,12 +981,50 @@ let _autoTradeVisible = false;
 function toggleAutoTrade() {
   _autoTradeVisible = !_autoTradeVisible;
   document.getElementById('auto-trade-modal').hidden = !_autoTradeVisible;
-  if (_autoTradeVisible) loadAutoTradeStatus();
+  if (_autoTradeVisible) {
+    previewAutoTradeWarning();
+    loadAutoTradeStatus();
+  }
 }
 
 function closeAutoTrade() {
   document.getElementById('auto-trade-modal').hidden = true;
   _autoTradeVisible = false;
+}
+
+// 依据表盘当前参数，本地预判"未验证配置"并显示告警（真正的拒绝由服务端 409 兜底）。
+// 规则与服务端 blocking_reasons / unvalidated_reasons 保持一致：
+//   阻断类：entry_mode=breakout（需触发单，当前仅支持限价单）、signal_mode=trend、atr_mult>0
+//   提示类：关闭趋势过滤
+function previewAutoTradeWarning() {
+  let cfg;
+  try { cfg = gatherDashboardParams(); } catch (e) { return; }
+  const blocking = [];
+  const notice = [];
+  if (cfg.entry_mode === 'breakout') {
+    blocking.push('入场方式 = breakout（突破入场），实盘需触发单支持');
+  }
+  if (cfg.signal_mode === 'trend') {
+    blocking.push('信号来源 = trend（纯趋势，不使用形态），已改动下单触发的定义');
+  }
+  if (cfg.atr_mult) {
+    blocking.push(`止损改用 ATR×${cfg.atr_mult}（改动了止损定价机制）`);
+  }
+  if (!cfg.trend_period) {
+    notice.push('已关闭趋势过滤（复盘中该维度方向不一致）');
+  }
+  const reasons = blocking.concat(notice);
+  if (reasons.length === 0) { showAutoTradeWarning([], []); return; }
+  showAutoTradeWarning(reasons, []);
+  // 非阻断（仅关闭趋势过滤）时不需要勾选确认 → 隐藏勾选框
+  const confirmEl = document.getElementById('at-confirm');
+  if (confirmEl && blocking.length === 0) {
+    const label = confirmEl.closest('label');
+    if (label) label.hidden = true;
+  } else if (confirmEl) {
+    const label = confirmEl.closest('label');
+    if (label) label.hidden = false;
+  }
 }
 
 // 读取表盘当前参数（复用给自动交易）
@@ -872,6 +1036,12 @@ function gatherDashboardParams() {
   const trendPeriod = trendEnabled ? (parseInt(trendPeriodEl ? trendPeriodEl.value : '50') || 50) : 0;
   const maType = maTypeEl ? maTypeEl.value : 'sma';
   const levEl = document.getElementById('risk-lev');
+  const entryEl = document.getElementById('risk-entry');
+  const gapEl = document.getElementById('risk-gap');
+  const smEl = document.getElementById('risk-signal-mode');
+  const atrEl2 = document.getElementById('risk-atr');
+  const atrRaw = parseFloat(atrEl2 ? atrEl2.value : '0');
+  const gapRaw = gapEl ? parseInt(gapEl.value) : 0;
   return {
     ticker: document.getElementById('ticker').value,
     interval: document.getElementById('interval').value,
@@ -880,6 +1050,10 @@ function gatherDashboardParams() {
     volume_filter: document.getElementById('volume-on').checked,
     trend_period: trendPeriod,
     ma_type: maType,
+    entry_mode: entryEl ? entryEl.value : 'close',
+    atr_mult: (isFinite(atrRaw) && atrRaw > 0) ? atrRaw : 0,
+    signal_mode: smEl ? smEl.value : 'pattern',
+    min_gap: (isFinite(gapRaw) && gapRaw > 1) ? gapRaw : 0,
     max_open_trades: 10,
     cooldown_seconds: 300,
     min_rr_ratio: 1.5,
@@ -897,15 +1071,30 @@ async function toggleAutoTradeRun() {
       toast('info', '⏸️ 自动交易已暂停', '参数已保留；重新开始将使用表盘当前参数');
     } else {
       const cfg = gatherDashboardParams();
+      // 未验证配置：带上"已确认"标记（勾选框由 showAutoTradeWarning 控制显隐）
+      const confirmEl = document.getElementById('at-confirm');
+      cfg.confirm_unvalidated = !!(confirmEl && confirmEl.checked);
       const resp = await fetch('/api/auto-trade', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(cfg),
       });
       const data = await resp.json();
-      if (!resp.ok) { toast('error', '开始失败', data.message || resp.statusText); }
-      else {
-        toast('success', '🚀 自动交易已开始', `${cfg.ticker} ${cfg.interval} · 每30秒扫描最新K线信号`);
+      if (resp.status === 409 && data.status === 'needs_confirmation') {
+        // 服务端拒绝：把告警渲染出来并要求勾选确认
+        showAutoTradeWarning(data.reasons || [], data.warning || []);
+        toast('error', '⚠️ 需要确认才能启动',
+              '该参数组合未经独立验证，请阅读告警并勾选确认后重试');
+      } else if (!resp.ok) {
+        toast('error', '开始失败', data.message || resp.statusText);
+      } else {
+        if (data.unvalidated) {
+          showAutoTradeWarning(data.config ? (data.config.entry_mode ? ['入场方式 = breakout（突破入场）'] : []) : [], data.warning || []);
+          toast('error', '⚠️ 已启动（未验证配置）', '该参数组合未经独立验证，请勿据此投入真金');
+        } else {
+          showAutoTradeWarning([], []);
+          toast('success', '🚀 自动交易已开始', `${cfg.ticker} ${cfg.interval} · 每30秒扫描最新K线信号`);
+        }
       }
     }
     loadAutoTradeStatus();
@@ -914,13 +1103,43 @@ async function toggleAutoTradeRun() {
   }
 }
 
+// 渲染未验证配置告警（reasons 为空则隐藏）
+function showAutoTradeWarning(reasons, warningLines) {
+  const box = document.getElementById('at-warning');
+  const reasonsEl = document.getElementById('at-warning-reasons');
+  const confirmEl = document.getElementById('at-confirm');
+  if (!box) return;
+  const label = confirmEl ? confirmEl.closest('label') : null;
+  if (!reasons || reasons.length === 0) {
+    box.hidden = true;
+    if (confirmEl) confirmEl.checked = false;
+    return;
+  }
+  box.hidden = false;
+  if (label) label.hidden = false;   // 默认显示勾选框；非阻断场景由调用方再隐藏
+  if (reasonsEl) {
+    reasonsEl.innerHTML = reasons.map(r => '· ' + escapeHtml(r)).join('<br>');
+  }
+  // 保留完整告警文本，便于用户悬浮查看
+  box.title = (warningLines && warningLines.length) ? warningLines.join('\n') : '';
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
 function renderAutoTradeParams(cfg) {
   const el = document.getElementById('at-params');
+  if (!el) return;
   if (!cfg.enabled && !cfg.interval) { el.textContent = '尚未开始'; return; }
   const trendTxt = cfg.trend_period > 0 ? `${(cfg.ma_type || 'sma').toUpperCase()}${cfg.trend_period}` : '关';
+  const entryTxt = (cfg.entry_mode === 'breakout') ? '突破极值 ⚠️' : '收盘价';
   el.textContent =
     `交易对: ${cfg.ticker}   周期: ${cfg.interval}   K线数: ${cfg.limit}\n` +
     `扫描窗口: ${cfg.scan_window}   量能: ${cfg.volume_filter ? '开' : '关'}   趋势: ${trendTxt}\n` +
+    `入场: ${entryTxt}   最小间隔: ${(cfg.min_gap > 1) ? cfg.min_gap + ' 根' : '无'}\n` +
     `最大持仓: ${cfg.max_open_trades}   冷却: ${cfg.cooldown_seconds}s   最小盈亏比: ${cfg.min_rr_ratio}`;
 }
 
@@ -1101,21 +1320,7 @@ async function confirmOrder() {
 
 // 原 placeOrder 改为打开弹窗
 async function placeOrder(idx) {
-  // 先获取可用保证金
-  try {
-    const resp = await fetch(`/api/account?ticker=${encodeURIComponent(tickerEl.value)}`);
-    const data = await resp.json();
-    if (data.balance) {
-      for (const b of data.balance) {
-        for (const d of (b.details || [])) {
-          if (d.ccy === 'USDT') {
-            _omAvailBal = parseFloat(d.availEq || d.availBal || 0);
-            break;
-          }
-        }
-      }
-    }
-  } catch (e) { _omAvailBal = 0; }
+  await ensureAvailBalance(0);   // 下单前强制刷新余额
   openOrderModal(idx);
 }
 
@@ -1238,10 +1443,18 @@ async function runBacktest() {
   const trend = document.getElementById('bt-trend-on').checked ? 50 : 0;
   const volume = document.getElementById('bt-volume-on').checked ? 1 : 0;
   const rr = parseFloat(document.getElementById('bt-rr').value) || 2;
+  const atr = parseFloat(document.getElementById('bt-atr').value) || 0;
+  const entryEl = document.getElementById('bt-entry');
+  const entry = entryEl ? entryEl.value : 'close';
+  const gapEl = document.getElementById('bt-gap');
+  const gapRaw = gapEl ? parseInt(gapEl.value) : 0;
+  const gap = (isFinite(gapRaw) && gapRaw > 1) ? gapRaw : 0;
+  const modeEl = document.getElementById('bt-mode');
+  const mode = modeEl ? modeEl.value : 'pattern';
   btn.disabled = true; btn.textContent = '回测中...（首次拉取整年数据较慢）';
   st.textContent = '正在拉取数据并回测，请稍候……（首次约 1~4 分钟，之后走缓存秒出）';
   try {
-    const resp = await fetch(`/api/backtest?ticker=${ticker}&interval=${interval}&bars=${bars}&trend=${trend}&volume=${volume}&rr=${rr}`);
+    const resp = await fetch(`/api/backtest?ticker=${ticker}&interval=${interval}&bars=${bars}&trend=${trend}&volume=${volume}&rr=${rr}&atr=${atr}&entry=${entry}&gap=${gap}&mode=${mode}`);
     const data = await resp.json();
     if (!resp.ok || data.error) {
       st.textContent = '';
@@ -1258,6 +1471,10 @@ async function runBacktest() {
       document.getElementById('bt-meta').textContent =
         `${ticker} · ${interval} · ${data.bars}根K线（约${data.span_days}天）` +
         (data.with_trend ? ' · 含50周期趋势过滤' : '') + (data.with_volume ? ' · 含量能确认' : '') +
+        ` · RR=${data.rr || 2}` + (data.atr_mult ? ` · 止损${data.atr_mult}×ATR` : ' · 结构止损') +
+        (data.signal_mode === 'trend' ? ' · 纯趋势' : '') +
+        (data.entry_mode === 'breakout' ? ' · 突破入场' : '') +
+        (data.min_gap > 1 ? ` · 同形态间隔≥${data.min_gap}根` : '') +
         ` · 耗时 ${data.elapsed_sec}s`;
       const rows = (data.signals || []).slice(-100).reverse().map(s => {
         const meta = { WIN: ['✅ 止盈', '#26a69a'], LOSS: ['❌ 止损', '#ef5350'], OPEN: ['⏳ 持仓中', '#e6b85c'] };
@@ -1526,13 +1743,36 @@ async function saveConfig() {
 
 // ---- 主流程 ----
 let refreshVersion = 0;
+
+// 读取可用保证金（带 30s 缓存，避免自动轮询每 5s 打一次账户接口）
+let _balCacheTs = 0;
+async function ensureAvailBalance(maxAgeMs = 30000) {
+  if (_omAvailBal > 0 && Date.now() - _balCacheTs < maxAgeMs) return _omAvailBal;
+  try {
+    const resp = await fetch(`/api/account?ticker=${encodeURIComponent(tickerEl.value)}`);
+    const data = await resp.json();
+    for (const b of (data.balance || [])) {
+      for (const d of (b.details || [])) {
+        if (d.ccy === 'USDT') {
+          _omAvailBal = parseFloat(d.availEq || d.availBal || 0) || 0;
+          _balCacheTs = Date.now();
+          return _omAvailBal;
+        }
+      }
+    }
+  } catch (e) { /* 保持上次值 */ }
+  return _omAvailBal;
+}
+
 async function refreshAll() {
   const version = ++refreshVersion;
   const volumeEnabled = document.getElementById('volume-on').checked;
   setStatus('加载中...');
   try {
     await syncParamsFromAutoTrade();   // 自动交易运行中时表盘参数跟随其快照
-    const [klines, signals] = await Promise.all([loadKlines(), loadSignals()]);
+    const [klines, signals] = await Promise.all([
+      loadKlines(), loadSignals(), ensureAvailBalance(),
+    ]);
     if (version !== refreshVersion) return;
     drawKlines(klines);
     // 更新信号列表；接口返回时间倒序(最新在前)，默认选中最新(0)
@@ -1605,7 +1845,7 @@ document.getElementById('poll').addEventListener('change', (e) => {
 });
 
 // ---- 参数持久化（localStorage，刷新不丢）----
-const _PARAM_IDS = ['interval', 'limit', 'scan', 'risk-lev', 'risk-rr', 'volume-on', 'volume-visible', 'poll'];
+const _PARAM_IDS = ['interval', 'limit', 'scan', 'risk-lev', 'risk-rr', 'risk-atr', 'risk-entry', 'risk-gap', 'volume-on', 'volume-visible', 'poll'];
 const _PARAM_CHECKBOX = new Set(['volume-on', 'volume-visible', 'poll']);
 
 function _readParam(id) {

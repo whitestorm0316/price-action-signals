@@ -3,7 +3,7 @@
 单页面 Web 界面，展示指定交易对的 **K 线** 与 **价格行为信号**，并提供**手动下单**入口
 （当前下单为 mock，预留 OKX 模拟盘接入）。
 
-复用阶段一的信号检测逻辑（`patterns.py` / `trend.py` / `okx_client.py`），**不重写**。
+- 复用阶段一的信号检测逻辑（`patterns.py` / `trend.py` / `atr.py` / `okx_client.py`），**不重写**。
 
 ## 功能
 
@@ -46,11 +46,57 @@ export OKX_PROXY=http://127.0.0.1:1087
 |------|------|------|
 | GET | `/` | 前端页面 |
 | GET | `/api/klines?ticker=BTC-USDT-SWAP&interval=5m&limit=100` | 返回 lightweight-charts 格式 `[{time,open,high,low,close}]` |
-| GET | `/api/signals?ticker=...&interval=...&scan=100&trend=50&ma_type=sma` | 返回检测到的信号 `[{action,price,sl,tp,strategy,ratio,timestamp,result,result_ts}]`；`scan`=扫描窗口(最近多少根K线)，`trend`=均线周期(0/空=关)，`ma_type`=sma/ema |
+| GET | `/api/signals?ticker=...&interval=...&scan=100&trend=50&ma_type=sma` | 返回检测到的信号；`scan`=扫描窗口(最近多少根K线)，`trend`=均线周期(0/空=关)，`ma_type`=sma/ema，`entry`=close/breakout（入场方式），`gap`=同形态最小间隔根数，`atr`=止损 ATR 倍数(0=结构止损)，`mode`=pattern/trend（信号来源） |
+| GET | `/api/backtest?ticker=...&bars=35040&trend=0&rr=2&atr=1.5&entry=close&gap=0&mode=trend` | 整年历史回测，参数与 `/api/signals` 同口径 |
 | POST | `/api/order` | 手动下单，body `{action,ticker,price,sl,tp,size}`，**当前 mock** |
 
 `/api/signals` 的 `result` 字段为信号结果判定（复用阶段一回测逻辑）：
 `WIN`=先到止盈(成功)、`LOSS`=先触止损(失败)、`OPEN`=仍在持仓。
+
+**`entry`（入场方式）**：`close`=形态收盘价入场（原行为，默认）；`breakout`=等价格越过
+形态极值再入场（多头取最高价、空头取最低价）。
+
+**`gap`（同形态最小间隔）**：同一形态连续出现时，距上次信号不足 `gap` 根 K 线的**忽略**。
+`0`/`1`=不过滤（原行为，默认）；pinbar 与吞没**各自独立计间隔**。调大即"降频换质量"。
+
+**`atr`（止损宽度）**：`0`=结构止损（形态极值外侧，**原有默认**）；`>0`=改用 `N×ATR(14)`。
+第八轮唯一被数据支持的成分——止损越宽，手续费占 R 的比例（`f`）越低。
+ATR 止损若比结构止损更贴近入场，程序取**离入场更远**的一侧，不会把风险缩到形态边界内。
+
+**`mode`（信号来源）**：`pattern`=检测 Pinbar/吞没触发（**原有默认**）；
+`trend`=**纯趋势**，只看均线斜率判方向，**完全不使用形态**。
+`mode=trend` 时需配合 `trend` 周期（`trend=0` 则不发任何信号——没有周期就无从判方向，不猜）。
+未知取值一律回退 `pattern`。
+
+### 参数与安全闸门
+
+仪表盘工具栏的**止损**（`结构止损` / `N×ATR`）、**入场**（`收盘价` / `突破极值`）、
+**来源**（`形态` / `纯趋势`）、**间隔**四个控件，以及回测弹窗的对应项，默认值分别为
+`0`（结构止损）、`close`、`pattern`、`0` —— **即原有行为逐字节不变**。
+
+自动交易使用**未验证配置**时的保护（服务端 `blocking_reasons` 返回 409 兜底，
+前端弹窗已同步预判）：
+
+| 偏离类型 | 例子 | 处理 |
+|----------|------|------|
+| **阻断类** | `entry_mode=breakout`（需触发单）、`signal_mode=trend`（不用形态）、`atr_mult>0`（改止损定价）、`candidate`/`trend_wide` 预设 | 启动前必须勾选确认，否则拒绝 |
+| **仅提示类** | 单独关闭趋势过滤 | 只在告警横幅提示，不阻断启动 |
+
+> ⚠️ `atr_mult>0` 与 `signal_mode=trend` 被归为**阻断类**，理由同样与**双重基线**有关：
+> 仪表盘的"原有行为"基线是**趋势过滤开启 + 结构止损 + 形态触发**，
+> 改动其中任一项都改变了"下单触发/风险定价"的定义，需显式确认。
+
+### 余额不足 ≠ 参数失效
+
+信号表格若**有信号但整列都是「余额不足」**，说明余额开不出 OKX 最小下单量，
+**不是**策略无信号、也不是参数没生效。展示路径会**保留**这些信号并打
+`affordable=false` + `required_balance`，同时在顶部黄色提示条、汇总的
+`可下单信号 0 / N` 指标、每行的「开不出」徽章上说明原因；
+**下单路径**（`/api/order`、自动交易）则严格丢弃，绝不提交开不出的仓。
+
+> 早期版本展示路径也走严格过滤，导致余额小时**表格永远为空**，
+> 容易被误判为"策略没信号 / 参数选了没用"。此行为已修正并加回归测试
+> （`test_api_signals_keeps_unaffordable_when_balance_too_small`）。
 
 `trend`/`ma_type` 参数启用**趋势交易过滤**：信号处收盘高于均线(升势)只留 BUY，
 低于均线(跌势)只留 SELL，过滤逆势信号。

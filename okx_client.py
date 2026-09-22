@@ -285,7 +285,6 @@ class OKXClient:
         except Exception:  # noqa: BLE001
             pass
         return combined
-        return candles
 
     def _request_with_retry(
         self, params: dict, urls: Optional[list[str]] = None

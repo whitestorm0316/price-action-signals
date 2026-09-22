@@ -2,16 +2,33 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import unittest
 from unittest import mock
 
-from web_dashboard import app as app_mod
+# ⚠️ 必须在导入 app 之前设置：把自动交易状态文件指向临时路径，
+# 否则测试会覆盖真实的 auto_trade_state.json（含运行配置、成交历史、持仓跟踪）。
+_TMP_STATE = os.path.join(tempfile.mkdtemp(prefix="pa_test_state_"), "auto_trade_state.json")
+os.environ["PA_AUTO_TRADE_STATE"] = _TMP_STATE
+
+from web_dashboard import app as app_mod  # noqa: E402
+
+# 双保险：即便 app 已在别处被导入过，也强制指向临时文件
+app_mod._AUTO_TRADE_STATE_FILE = _TMP_STATE
 
 
 class TestDashboardAPI(unittest.TestCase):
     def setUp(self):
         app_mod.app.config["TESTING"] = True
         self.client = app_mod.app.test_client()
+        # 默认把余额固定住，使本文件真正"离线"且结果确定。
+        # ⚠️ 否则 /api/signals → enrich_signals_with_risk 会调用真实账户接口：代理不通时返回 0，
+        # 而 balance<=0 会**提前退出、丢弃全部信号**，测试就会随网络环境时好时坏。
+        self._bal_patch = mock.patch.object(
+            app_mod, "get_usdt_balance", return_value=5000.0)
+        self._bal_patch.start()
+        self.addCleanup(self._bal_patch.stop)
 
     def test_klines_format(self):
         fake = [
@@ -348,6 +365,70 @@ class TestDashboardAPI(unittest.TestCase):
         self.assertEqual(captured["trend"], 50)
         self.assertEqual(captured["ma"], "ema")
         self.assertEqual(captured["scan"], 80)
+
+    # ---- 余额不足时的展示路径（回归：曾导致信号表格永远为空）----
+    def test_api_signals_keeps_unaffordable_when_balance_too_small(self):
+        """余额开不出最小仓位时，展示路径仍须返回信号并标记 affordable=False。
+
+        回归背景：余额 8.36 USDT、BTC 最小下单名义 8.47 USDT 时，
+        旧逻辑在富集环节丢弃全部信号 → 表格永远为空 →
+        用户误以为"策略没信号 / 参数不生效"，而真相是余额不足。
+        """
+        fake = [{
+            "action": "BUY", "price": 84709.0, "sl": 84018.0, "tp": 86090.0,
+            "strategy": "bullish_pinbar", "ratio": 2.0, "timestamp": 1700000000,
+            "result": "OPEN", "result_ts": None,
+        }]
+        with mock.patch.object(app_mod, "detect_signals", return_value=fake), \
+             mock.patch.object(app_mod, "get_usdt_balance", return_value=8.36):
+            resp = self.client.get("/api/signals?ticker=BTC-USDT-SWAP")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(len(data), 1, "余额不足时不应把信号全部丢弃（否则表格永远为空）")
+
+        s = data[0]
+        self.assertFalse(s["affordable"])                 # 明确标记开不出
+        self.assertEqual(s["min_contracts"], 0.01)        # BTC 最小张数
+        self.assertEqual(s["face_value"], 0.01)           # 1 张 = 0.01 BTC
+        self.assertEqual(s["ticker"], "BTC-USDT-SWAP")
+        # required_balance = minSz × price × ctVal × max_trades ÷ leverage
+        expected = 0.01 * 84709.0 * 0.01 * 10 / 3.0
+        self.assertAlmostEqual(s["required_balance"], expected, places=2)
+        self.assertGreater(s["required_balance"], 8.36, "所需余额必须大于现有余额才合理")
+        # 仍须带齐渲染所需字段
+        for k in ("risk_reward_ratio", "suggested_contracts", "notional"):
+            self.assertIn(k, s)
+
+    def test_api_signals_marks_affordable_when_balance_sufficient(self):
+        """余额充足时，affordable=True 且不出现 required_balance。"""
+        fake = [{
+            "action": "BUY", "price": 84709.0, "sl": 84018.0, "tp": 86090.0,
+            "strategy": "bullish_pinbar", "ratio": 2.0, "timestamp": 1700000000,
+            "result": "OPEN", "result_ts": None,
+        }]
+        with mock.patch.object(app_mod, "detect_signals", return_value=fake), \
+             mock.patch.object(app_mod, "get_usdt_balance", return_value=5000.0):
+            data = self.client.get("/api/signals?ticker=BTC-USDT-SWAP").get_json()
+        self.assertEqual(len(data), 1)
+        self.assertTrue(data[0]["affordable"])
+        self.assertNotIn("required_balance", data[0])
+        self.assertGreater(data[0]["suggested_contracts"], 0)
+
+    def test_enrich_order_path_still_strict(self):
+        """下单路径（require_affordable 默认 True）必须丢弃开不出的仓。"""
+        raw = [{
+            "action": "BUY", "price": 84709.0, "sl": 84018.0, "tp": 86090.0,
+            "strategy": "bullish_pinbar", "ratio": 2.0, "timestamp": 1700000000,
+            "result": "OPEN", "result_ts": None,
+        }]
+        strict = app_mod.enrich_signals_with_risk(
+            [dict(raw[0])], 8.36, max_leverage=3.0, max_open_trades=10,
+            face_value=0.01, lot=0.01, min_sz=0.01)
+        lenient = app_mod.enrich_signals_with_risk(
+            [dict(raw[0])], 8.36, max_leverage=3.0, max_open_trades=10,
+            face_value=0.01, lot=0.01, min_sz=0.01, require_affordable=False)
+        self.assertEqual(len(strict), 0, "下单路径绝不能建议开不出的仓")
+        self.assertEqual(len(lenient), 1, "展示路径应保留信号以便说明原因")
 
 
 if __name__ == "__main__":

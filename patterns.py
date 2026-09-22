@@ -25,6 +25,8 @@ class Pattern:
     # 量能确认（可选，未启用量能时为 None）
     volume_confirm: Optional[str] = None   # 如 "放量Pinbar" / "缩量吞没"，中性或未启用为 None
     volume_ratio: Optional[float] = None   # 量能比率 = 当前量 / 过去20根均量，未启用为 None
+    # 入场方式（"close" = 形态收盘价，默认行为；"breakout" = 形态极值，等突破才进场）
+    entry_mode: str = "close"
 
 
 # ---------------------------------------------------------------------------
@@ -36,6 +38,9 @@ def detect_pinbar(
     close_zone: float = 1 / 3,
     volume_ratio: Optional[float] = None,
     rr: float = 2.0,
+    atr: Optional[float] = None,
+    atr_mult: Optional[float] = None,
+    entry_mode: str = "close",
 ) -> Optional[Pattern]:
     """检测看涨/看跌 Pinbar。
 
@@ -52,6 +57,13 @@ def detect_pinbar(
             量能确认标签（放量Pinbar / 缩量Pinbar），作为信号加权/降级依据。
         rr: 盈亏比 (Reward/Risk) = 目标价距入场 ÷ 止损距入场，默认 2:1。
             目标价按 entry ± rr*风险 推算。
+        atr: 当前 ATR 值（可选，无前视）。仅在 atr_mult 给定时用于定价止损。
+        atr_mult: 止损改为 ATR 倍数（可选）。给定且 >0、且 atr 有效时，
+            止损 = entry ∓ atr_mult × atr，替代"影线极值外侧"的结构止损；
+            为 None 时保持原有结构止损（默认行为不变）。
+        entry_mode: 入场方式。"close"（默认）= 形态收盘价入场，行为不变；
+            "breakout" = 入场价取形态极值（看涨取最高价、看跌取最低价），
+            即等价格真正越过形态极值才进场（复盘显示可过滤假信号）。
 
     Returns:
         Pattern 或 None
@@ -68,26 +80,32 @@ def detect_pinbar(
 
     # 看涨 Pinbar: 下影线 >= wick_ratio*实体，收盘落在整体区间的顶部 1/3
     if lower_wick >= wick_ratio * body and current.close >= current.high - close_zone * rng:
+        entry_px = _entry_price(entry_mode, current, "BUY")
         return _build_pattern(
             name="bullish_pinbar",
             action="BUY",
-            entry=current.close,
-            stop=current.low - _tick_buffer(current),  # 影线(下)极值外侧
+            entry=entry_px,
+            stop=_stop_price("BUY", entry_px,
+                             current.low - _tick_buffer(current), atr, atr_mult),
             rr=rr,
             volume_confirm=volume_confirm(volume_ratio, "pinbar"),
             volume_ratio=volume_ratio,
+            entry_mode=entry_mode,
         )
 
     # 看跌 Pinbar: 上影线 >= wick_ratio*实体，收盘落在整体区间的底部 1/3
     if upper_wick >= wick_ratio * body and current.close <= current.low + close_zone * rng:
+        entry_px = _entry_price(entry_mode, current, "SELL")
         return _build_pattern(
             name="bearish_pinbar",
             action="SELL",
-            entry=current.close,
-            stop=current.high + _tick_buffer(current),  # 影线(上)极值外侧
+            entry=entry_px,
+            stop=_stop_price("SELL", entry_px,
+                             current.high + _tick_buffer(current), atr, atr_mult),
             rr=rr,
             volume_confirm=volume_confirm(volume_ratio, "pinbar"),
             volume_ratio=volume_ratio,
+            entry_mode=entry_mode,
         )
 
     return None
@@ -101,6 +119,9 @@ def detect_engulfing(
     current: Candle,
     volume_ratio: Optional[float] = None,
     rr: float = 2.0,
+    atr: Optional[float] = None,
+    atr_mult: Optional[float] = None,
+    entry_mode: str = "close",
 ) -> Optional[Pattern]:
     """检测看涨/看跌吞没。
 
@@ -116,6 +137,12 @@ def detect_engulfing(
         current:  当前 K 线
         volume_ratio: 当前 K 线的量能比率（可选）。提供时给形态附加
             量能确认标签（放量吞没 / 缩量吞没），作为信号加权/降级依据。
+        atr: 当前 ATR 值（可选，无前视）。仅在 atr_mult 给定时用于定价止损。
+        atr_mult: 止损改为 ATR 倍数（可选）。给定且 >0、且 atr 有效时，
+            止损 = entry ∓ atr_mult × atr，替代"两K线极值外侧"的结构止损；
+            为 None 时保持原有结构止损（默认行为不变）。
+        entry_mode: 入场方式。"close"（默认）= 形态收盘价入场，行为不变；
+            "breakout" = 入场价取形态极值（看涨取最高价、看跌取最低价）。
 
     Returns:
         Pattern 或 None
@@ -130,14 +157,18 @@ def detect_engulfing(
         and current.body_bottom <= previous.body_bottom
         and current.body_top >= previous.body_top
     ):
+        entry_px = _entry_price(entry_mode, current, "BUY")
         return _build_pattern(
             name="bullish_engulfing",
             action="BUY",
-            entry=current.close,
-            stop=min(current.low, previous.low) - _tick_buffer(current),  # 形态(两K线)下极值外侧
+            entry=entry_px,
+            stop=_stop_price("BUY", entry_px,
+                             min(current.low, previous.low) - _tick_buffer(current),
+                             atr, atr_mult),
             rr=rr,
             volume_confirm=volume_confirm(volume_ratio, "engulfing"),
             volume_ratio=volume_ratio,
+            entry_mode=entry_mode,
         )
 
     # 看跌吞没
@@ -147,14 +178,18 @@ def detect_engulfing(
         and current.body_top >= previous.body_top
         and current.body_bottom <= previous.body_bottom
     ):
+        entry_px = _entry_price(entry_mode, current, "SELL")
         return _build_pattern(
             name="bearish_engulfing",
             action="SELL",
-            entry=current.close,
-            stop=max(current.high, previous.high) + _tick_buffer(current),  # 形态(两K线)上极值外侧
+            entry=entry_px,
+            stop=_stop_price("SELL", entry_px,
+                             max(current.high, previous.high) + _tick_buffer(current),
+                             atr, atr_mult),
             rr=rr,
             volume_confirm=volume_confirm(volume_ratio, "engulfing"),
             volume_ratio=volume_ratio,
+            entry_mode=entry_mode,
         )
 
     return None
@@ -163,6 +198,49 @@ def detect_engulfing(
 # ---------------------------------------------------------------------------
 # 内部工具
 # ---------------------------------------------------------------------------
+def _entry_price(entry_mode: str, candle: Candle, action: str) -> float:
+    """决定入场价。
+
+    - ``"close"``（默认）：形态收盘价，即原有行为，逐字节不变；
+    - ``"breakout"``：形态极值（看涨取最高价、看跌取最低价），
+      即等价格真正越过形态极值才进场。复盘显示这可过滤"形态出现但没跟风"
+      的假信号；但在实盘中它意味着需要**触发单**而非限价单。
+
+    无法识别的取值一律回退 ``"close"``，保证既有行为不受影响。
+    """
+    if str(entry_mode or "").strip().lower() == "breakout":
+        return candle.high if action == "BUY" else candle.low
+    return candle.close
+
+
+def _stop_price(
+    action: str,
+    entry: float,
+    struct_stop: float,
+    atr: Optional[float],
+    atr_mult: Optional[float],
+) -> float:
+    """决定止损价：atr_mult 启用时用 ATR 倍数，否则沿用结构止损。
+
+    ATR 模式：stop = entry ∓ atr_mult × atr（BUY 取减、SELL 取加）。
+    为 None / 非正 / atr 无效时一律回退结构止损，保证默认行为完全不变。
+    两种口径都取「离入场更远」的那一侧，避免 ATR 止损比结构止损更贴近入场
+    而把风险放大到形态之外。
+    """
+    if atr_mult is None or atr is None:
+        return struct_stop
+    try:
+        mult = float(atr_mult)
+        atr_v = float(atr)
+    except (TypeError, ValueError):
+        return struct_stop
+    if mult <= 0 or atr_v <= 0:
+        return struct_stop
+    if action == "BUY":
+        return min(struct_stop, entry - mult * atr_v)
+    return max(struct_stop, entry + mult * atr_v)
+
+
 def _tick_buffer(candle: Candle) -> float:
     """根据价格量级估算一个最小缓冲，确保止损严格在极值“外侧”。
 
@@ -181,6 +259,7 @@ def _build_pattern(
     rr: float = 2.0,
     volume_confirm: Optional[str] = None,
     volume_ratio: Optional[float] = None,
+    entry_mode: str = "close",
 ) -> Pattern:
     """按固定盈亏比计算目标价与风险值。
 
@@ -188,6 +267,8 @@ def _build_pattern(
         rr: 固定盈亏比 (Reward / Risk)，默认 2:1
         volume_confirm: 量能确认标签（可选），如 "放量Pinbar"
         volume_ratio: 量能比率（可选）
+        entry_mode: 入场方式（"close" / "breakout"），随 Pattern 一并返回，
+            供上层决定实盘下单类型（限价 vs 触发）。
     """
     risk = abs(entry - stop)
     take_profit = entry + rr * risk if action == "BUY" else entry - rr * risk
@@ -201,4 +282,58 @@ def _build_pattern(
         risk=risk,
         volume_confirm=volume_confirm,
         volume_ratio=volume_ratio,
+        entry_mode=entry_mode,
+    )
+
+
+def build_trend_signal(
+    candle: Candle,
+    action: str,
+    atr: Optional[float],
+    atr_mult: float = 1.5,
+    rr: float = 2.0,
+) -> Optional[Pattern]:
+    """按**纯趋势**规则构造信号（不使用任何形态）。
+
+    这是第八轮"纯趋势对照实验"（`PRICE_ACTION_SYNTHESIS.md` 步骤 5）的落地：
+    方向由趋势决定（由调用方判定 ``action``），止损 = ``entry ∓ atr_mult × ATR``。
+
+    为什么需要它
+    ------------
+    第八轮证明 **Pinbar/吞没不含方向信息**（匹配随机入场 α ≈ 0、p ≈ 0.83），
+    所以 ``trend_wide`` 预设若仍靠形态触发信号，就与自身描述矛盾。
+    本函数提供一条**完全绕过形态**的路径：只要趋势判定给出方向，就按
+    ATR 止损直接开仓，让"纯趋势 + 宽止损"这一组合能够被真实地表达与回测。
+
+    注意：这**不代表推荐交易**。该组合的 BTC 正 t（+1.93）来自市场漂移
+    （与同向随机入场比 α = −0.019，z = −0.22），ETH 上为负。
+
+    Args:
+        candle: 信号所在 K 线（入场价取收盘价，与 ``entry_mode=close`` 一致）。
+        action: "BUY" 或 "SELL"。
+        atr: 当前 ATR（**必填**，否则无法按 ATR 定价，返回 None）。
+        atr_mult: 止损的 ATR 倍数，默认 1.5。
+        rr: 盈亏比，默认 2.0。
+
+    Returns:
+        Pattern；``atr`` 无效或 ``atr_mult <= 0`` 时返回 None（不猜止损）。
+    """
+    if action not in ("BUY", "SELL"):
+        return None
+    try:
+        mult = float(atr_mult)
+        atr_v = float(atr) if atr is not None else 0.0
+    except (TypeError, ValueError):
+        return None
+    if mult <= 0 or atr_v <= 0:
+        return None
+    entry = candle.close
+    stop = entry - mult * atr_v if action == "BUY" else entry + mult * atr_v
+    return _build_pattern(
+        name="trend_follow",
+        action=action,
+        entry=entry,
+        stop=stop,
+        rr=rr,
+        entry_mode="close",
     )

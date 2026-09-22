@@ -93,7 +93,91 @@ def trend_allows(pattern: Pattern, trend: Optional[str]) -> bool:
     if trend is None:
         return True
     if trend == UP:
-        return pattern.action == "BUY"
+        return True if pattern.action == "BUY" else False
     if trend == DOWN:
-        return pattern.action == "SELL"
+        return True if pattern.action == "SELL" else False
     return True
+
+
+#: 斜率判定趋势时的默认阈值系数：|MA 斜率| 需超过 ``mult × ATR / price``。
+#: 该口径来自第八轮"纯趋势对照实验"（见 `PRICE_ACTION_SYNTHESIS.md` 步骤 5），
+#: 用于把"横盘微动"判为无趋势（flat），避免在震荡里反复双向开仓。
+DEFAULT_SLOPE_THRESHOLD = 0.2
+
+
+def ma_slope_at(
+    candles: list[Candle],
+    idx: int,
+    period: int,
+    kind: str = "sma",
+) -> Optional[float]:
+    """计算 ``candles[idx]`` 处的均线**斜率**（相对变化率）。
+
+    取"最近 period 根"与"再前 period 根"的均线之差，再除以价格归一化：
+
+        slope = (MA(收盘价, idx−period+1 … idx) − MA(收盘价, idx−2·period+1 … idx−period))
+                / 后者
+
+    **只用 idx 及之前的数据**，无前视偏差。
+
+    Returns:
+        相对斜率；数据不足（``idx + 1 < 2 × period``）或参数非法时返回 None。
+    """
+    try:
+        p = int(period)
+    except (TypeError, ValueError):
+        return None
+    if p <= 0 or idx < 0 or idx >= len(candles) or idx + 1 < 2 * p:
+        return None
+    recent = [c.close for c in candles[idx + 1 - p: idx + 1]]
+    older = [c.close for c in candles[idx + 1 - 2 * p: idx + 1 - p]]
+    ma_now = _moving_average(recent, p, kind)
+    ma_prev = _moving_average(older, p, kind)
+    if ma_now is None or ma_prev is None or not ma_prev:
+        return None
+    return (ma_now - ma_prev) / ma_prev
+
+
+def trend_slope_at(
+    candles: list[Candle],
+    idx: int,
+    period: int,
+    kind: str = "sma",
+    atr: Optional[float] = None,
+    threshold: float = DEFAULT_SLOPE_THRESHOLD,
+) -> Optional[str]:
+    """基于**均线斜率**判断趋势方向（第八轮"纯趋势"信号的口径）。
+
+    与 :func:`trend_at`（比较收盘价与均线）不同，本函数比较**两段均线**，
+    因此能区分"横盘"与"趋势"：
+
+      * 斜率 > ``threshold × ATR / price`` → ``UP``
+      * 斜率 < ``−threshold × ATR / price`` → ``DOWN``
+      * 否则 → ``None``（横盘/无趋势）
+
+    Args:
+        candles: 升序 K 线列表。
+        idx: 信号所在 K 线下标。
+        period: 均线周期（如 20）。
+        kind: "sma" 或 "ema"。
+        atr: 当前 ATR（可选）。提供时阈值随波动率缩放；否则只与固定阈值比较。
+        threshold: 阈值系数，默认 0.2。
+
+    Returns:
+        ``UP`` / ``DOWN`` / ``None``（横盘或数据不足）。
+    """
+    slope = ma_slope_at(candles, idx, period, kind)
+    if slope is None:
+        return None
+    # 阈值按波动率缩放：ATR 相对价格的占比 × 系数
+    try:
+        th = float(threshold)
+    except (TypeError, ValueError):
+        th = DEFAULT_SLOPE_THRESHOLD
+    if atr and candles[idx].close:
+        th = th * float(atr) / candles[idx].close
+    if slope > th:
+        return UP
+    if slope < -th:
+        return DOWN
+    return None
